@@ -1,0 +1,129 @@
+﻿using System;
+using System.Collections.Generic;
+using Brutal.JoltApi;
+using Brutal.Numerics;
+
+namespace BrutalSandbox.Framework.Physics;
+
+public sealed class PhysicsManager : IDisposable
+{
+    private static PhysicsManager? _instance;
+    public static PhysicsManager Instance => _instance ?? throw new InvalidOperationException("PhysicsManager не инициализирован!");
+
+    public const ushort LayerStatic = 0;
+    public const ushort LayerMoving = 1;
+
+    private TempAllocatorImpl _tempAllocator;
+    private JobSystemThreadPool _jobSystem;
+    private BroadPhaseLayerInterfaceTable _broadPhaseLayers;
+    private ObjectLayerPairFilterTable _pairFilter;
+    private ObjectVsBroadPhaseLayerFilterTable _broadPhaseFilter;
+    private PhysicsSystem _physicsSystem;
+    private BodyInterface _bodyInterface;
+
+    private readonly List<(uint BodyId, string AssetName)> _physicsObjects = new();
+    private double _accumulator;
+    private const float TimeStep = 1.0f / 60.0f;
+
+    public BodyInterface BodyInterface => _bodyInterface;
+    public PhysicsSystem PhysicsSystem => _physicsSystem;
+    public static void Initialize()
+    {
+        if (_instance != null) return;
+
+        Jolt.RegisterDefaultAllocator();
+        Factory.Instance = Factory.Create();
+        Jolt.RegisterTypes();
+
+        _instance = new PhysicsManager();
+    }
+
+    private PhysicsManager()
+    {
+        _tempAllocator = TempAllocatorImpl.Create(100 * 1024 * 1024);
+
+        _jobSystem = JobSystemThreadPool.Create(2048, 16, -1);
+
+        _broadPhaseLayers = BroadPhaseLayerInterfaceTable.Create(2, 2);
+        _broadPhaseLayers.MapObjectToBroadPhaseLayer(LayerStatic, 0);
+        _broadPhaseLayers.MapObjectToBroadPhaseLayer(LayerMoving, 1);
+
+        _pairFilter = ObjectLayerPairFilterTable.Create(2);
+        _pairFilter.EnableCollision(LayerStatic, LayerMoving);
+        _pairFilter.EnableCollision(LayerMoving, LayerMoving);
+
+        _broadPhaseFilter = ObjectVsBroadPhaseLayerFilterTable.Create(_broadPhaseLayers, 2, _pairFilter, 2);
+
+        _physicsSystem = PhysicsSystem.Create();
+        _physicsSystem.Init(10240, 0, 10240, 10240, _broadPhaseLayers, _broadPhaseFilter, _pairFilter);
+
+        _bodyInterface = _physicsSystem.GetBodyInterface();
+    }
+
+    /// <summary>
+    /// Создает и регистрирует физическое тело в мире.
+    /// </summary>
+    public uint CreateBody(ShapeSettings shapeSettings, float3 position, floatQuat rotation, MotionType motionType, ushort layer, string assetName)
+    {
+        using var settings = BodyCreationSettings.Create(shapeSettings, position, rotation, motionType, layer);
+        var activation = (motionType == MotionType.Static) ? Activation.DontActivate : Activation.Activate;
+
+        // ИСПРАВЛЕНО: Для статических ландшафтов принудительно оптимизируем настройки Broadphase,
+        // чтобы добавление новой земли между чанками не приводило к лагам симуляции кубов.
+        if (motionType == MotionType.Static)
+        {
+            settings.SetIsSensor(false);
+        }
+
+        uint bodyId = _bodyInterface.CreateAndAddBody(settings, activation);
+        _physicsObjects.Add((bodyId, assetName));
+
+        return bodyId;
+    }
+
+
+    /// <summary>
+    /// Продвигает симуляцию вперед с фиксированным шагом (фикс накопителя времени).
+    /// </summary>
+    public void Update(double deltaTime)
+    {
+        _accumulator += Math.Min(deltaTime, 0.25);
+
+        while (_accumulator >= TimeStep)
+        {
+            _physicsSystem.Update(TimeStep, 1, _tempAllocator, _jobSystem);
+            _accumulator -= TimeStep;
+        }
+    }
+
+    /// <summary>
+    /// Возвращает список всех зарегистрированных физических тел для последующего рендеринга.
+    /// </summary>
+    public IEnumerable<(uint BodyId, string AssetName)> GetActiveObjects() => _physicsObjects;
+
+    public void Dispose()
+    {
+        foreach (var obj in _physicsObjects)
+        {
+            if (_bodyInterface.IsAdded(obj.BodyId))
+            {
+                _bodyInterface.RemoveBody(obj.BodyId);
+                _bodyInterface.DestroyBody(obj.BodyId);
+            }          
+        }
+        _physicsObjects.Clear();
+
+        _physicsSystem.Dispose();
+        _broadPhaseFilter.Dispose();
+        _pairFilter.Dispose();
+        _broadPhaseLayers.Dispose();
+        _jobSystem.Dispose();
+        _tempAllocator.Dispose();
+
+        Jolt.UnregisterTypes();
+        Factory.DestroyInstance();
+
+        _instance = null;
+    }
+
+}
