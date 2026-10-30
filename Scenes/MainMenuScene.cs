@@ -2,11 +2,14 @@
 using Brutal.ImGuiApi;
 using Brutal.ImGuiApi.Backends;
 using Brutal.Numerics;
-using System.Diagnostics;
+using Brutal.OpenGlApi;
+using BrutalSandbox.Framework;
 using BrutalSandbox.Framework.Audio;
 using BrutalSandbox.Framework.Files;
 using BrutalSandbox.Framework.Localization;
+using BrutalSandbox.Framework.Physics;
 using BrutalSandbox.Framework.Scenes;
+using System.Diagnostics;
 
 namespace BrutalSandbox;
 
@@ -112,6 +115,32 @@ public sealed class MainMenuScene : IScene
                     ImGui.EndTabItem();
                 }
 
+                if (ImGui.BeginTabItem(LocalizationKeys.MenuModsTab.ToUtf8()))
+                {
+                    ImGui.Spacing();
+                    ImGui.TextColored(new float4(0.2f, 0.8f, 1.0f, 1.0f), "Установленные модификации:"u8);
+                    ImGui.Separator();
+
+                    var mods = ModManager.LoadedMods;
+                    if (mods.Count == 0)
+                    {
+                        ImGui.Text(LocalizationKeys.MenuNoMods.ToUtf8());
+                    }
+                    else
+                    {
+                        foreach (var mod in mods)
+                        {
+                            if (ImGui.TreeNode($"{mod.Name} v{mod.Version}"))
+                            {
+                                ImGui.Text($"Автор: {mod.Author}");
+                                ImGui.Text($"Сборка: {mod.AssemblyName}");
+                                ImGui.TreePop();
+                            }
+                        }
+                    }
+                    ImGui.EndTabItem();
+                }
+
                 if (ImGui.BeginTabItem(LocalizationKeys.MenuCreditsTab.ToUtf8()))
                 {
                     ImGui.Spacing();
@@ -169,6 +198,9 @@ public sealed class MainMenuScene : IScene
                     {
                         OpenUrl("https://screamingbrainstudios.itch.io/tiny-texture-pack");
                     }
+
+                    ImGui.TextWrapped("Audio engine built using FMOD Engine by Firelight Technologies Pty Ltd.");
+                    ImGui.SameLine(380);
 
                     ImGui.EndTabItem();
                 }

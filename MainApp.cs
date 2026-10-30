@@ -3,8 +3,9 @@ using Brutal.GlfwApi;
 using Brutal.ImGuiApi;
 using Brutal.ImGuiApi.Backends;
 using Brutal.ImGuiApi.FreeType;
+using Brutal.JoltApi;
 using Brutal.Numerics;
-using System.Numerics;
+using Brutal.OpenGlApi;
 using BrutalSandbox.Framework;
 using BrutalSandbox.Framework.Audio;
 using BrutalSandbox.Framework.Files;
@@ -13,11 +14,13 @@ using BrutalSandbox.Framework.Network;
 using BrutalSandbox.Framework.Physics;
 using BrutalSandbox.Framework.Scenes;
 using BrutalSandbox.Framework.UI;
+using System.Numerics;
 
 namespace BrutalSandbox;
 
 public sealed class MainApp : IDisposable
 {
+    private readonly string modsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "mods");
     private bool _showDebugMenu = false;
     private bool _f3WasPressed = false;
     private float _fpsTimer = 0f;
@@ -37,6 +40,7 @@ public sealed class MainApp : IDisposable
     private readonly LocalizationManager _locManager;
 
     private IScene? _currentScene;
+    public IScene? CurrentScene => _currentScene;
     private GameState _nextState = GameState.Loading;
 
     private double2 _lastCursor;
@@ -46,13 +50,15 @@ public sealed class MainApp : IDisposable
     public LocalizationManager LocManager => _locManager;
     public GlfwWindow Window => _window;
 
-    private NetworkManager _networkManager = new();
+    private NetworkManager _networkManager;
     public NetworkManager Network => _networkManager;
 
     public MainApp(GlfwWindow window, bool useOpenGl)
     {
         _window = window;
         _useOpenGl = useOpenGl;
+
+        _networkManager = new NetworkManager(this);
 
         AudioManager.Initialize();
         _assetManager = new AssetManager();
@@ -86,6 +92,8 @@ public sealed class MainApp : IDisposable
 
         _lastCursor = window.CursorPos;
 
+        ModManager.InitAndLoadMods(modsPath, null);
+
         // Начинаем с главного меню
         ChangeScene(GameState.MainMenu);
     }
@@ -115,10 +123,86 @@ public sealed class MainApp : IDisposable
         }
 
         _currentScene?.Initialize();
+
+        // ЕСЛИ ПЕРЕШЛИ В ИГРУ — ЗАПЕКАЕМ 3D ИКОНКИ
+        if (_nextState == GameState.Gameplay)
+        {
+            BakeBlockIcons();
+        }
+
         _nextState = GameState.Loading; // Сбрасываем триггер перехода
     }
 
-    // Добавьте эти поля в класс MainApp
+    public void BakeBlockIcons()
+    {
+        MeshData cubeMesh = Framework.Graphics.PrimitiveGenerator.CreateCube();
+        MeshData capsuleMesh = Framework.Graphics.PrimitiveGenerator.CreateCapsule(1.0f, 0.4f);
+
+        float3 cameraPos = new float3(1.3f, 1.3f, 1.3f);
+        float4x4 iconView = float4x4.CreateLookAt(cameraPos, float3.Zero, new float3(0, 1, 0));
+        float4x4 iconProj = float4x4.CreateOrthographic(1.6f, 1.6f, 0.1f, 10f);
+        float4x4 finalIconViewProj = iconView * iconProj;
+
+        if (!_useOpenGl)
+        {
+            // === РЕЖИМ VULKAN ===
+            foreach (var block in BlockRegistry.RegisteredBlocks)
+            {
+                MeshData targetMesh = block.Shape == BlockShape.Capsule ? capsuleMesh : cubeMesh;
+
+                // Безопасно получаем 64-битный хэндл дескриптора Vulkan напрямую из рендерера
+                ImTextureRef vkIconRef = _renderer.BakeBlockIconToTexture(block.Id, targetMesh, block.TextureName, finalIconViewProj);
+
+                // Записываем чистый ImTextureRef без промежуточных OpenGL структур
+                _assetManager.RegisterGeneratedIconRef(block.Id, vkIconRef);
+            }
+            return;
+        }
+
+        // === РЕЖИМ OPENGL ===
+        foreach (var block in BlockRegistry.RegisteredBlocks)
+        {
+            OpenGl.Viewport(0, 0, 64, 64);
+            OpenGl.ClearColor(new float4(0.0f, 0.0f, 0.0f, 0.0f));
+            OpenGl.Clear(GlClearBit.Color | GlClearBit.Depth);
+
+            _renderer.PrepareIconBake(finalIconViewProj, cameraPos);
+
+            MeshData targetMesh = block.Shape == BlockShape.Capsule ? capsuleMesh : cubeMesh;
+            float4x4 modelMatrix = float4x4.Identity;
+
+            if (block.Shape == BlockShape.Platform)
+            {
+                modelMatrix = float4x4.CreateScale(1.0f, 0.3f, 1.0f);
+            }
+
+            if (targetMesh != null)
+            {
+                _renderer.RenderMesh(targetMesh, modelMatrix, block.TextureName);
+            }
+
+            GlTexture[] iconTexArray = [default];
+            OpenGl.GenTextures(iconTexArray);
+            GlTexture iconTex = iconTexArray[0];
+            OpenGl.BindTexture(OpenGl.GL_TEXTURE_2D, iconTex.Id);
+
+            OpenGl.CopyTexImage2D(OpenGl.GL_TEXTURE_2D, 0, 0x1908, 0, 0, 64, 64, 0);
+
+            OpenGl.TexParameterFloat(OpenGl.GL_TEXTURE_2D, OpenGl.GL_TEXTURE_MIN_FILTER, (int)OpenGl.GL_LINEAR);
+            OpenGl.TexParameterFloat(OpenGl.GL_TEXTURE_2D, OpenGl.GL_TEXTURE_MAG_FILTER, (int)OpenGl.GL_LINEAR);
+            OpenGl.TexParameterFloat(OpenGl.GL_TEXTURE_2D, OpenGl.GL_TEXTURE_WRAP_S, 0x812F);
+            OpenGl.TexParameterFloat(OpenGl.GL_TEXTURE_2D, OpenGl.GL_TEXTURE_WRAP_T, 0x812F);
+
+            // Для OpenGL также упаковываем в общий безопасный формат ImTextureRef
+            ImTextureRef glIconRef = new ImTextureRef { _TexID = new ImTextureID((nint)iconTex.Id) };
+            _assetManager.RegisterGeneratedIconRef(block.Id, glIconRef);
+        }
+
+        OpenGl.BindTexture(OpenGl.GL_TEXTURE_2D, 0);
+
+        var framebufferSize = _window.FramebufferSize;
+        _renderer.Resize(framebufferSize.X, framebufferSize.Y);
+    }
 
 
     public void Frame()

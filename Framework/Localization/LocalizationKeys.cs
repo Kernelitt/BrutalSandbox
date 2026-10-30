@@ -40,4 +40,18 @@ public static class LocalizationKeys
     public static readonly LString GameplayFrictionCoeff = LStrings.Create("Gameplay.FrictionCoeff", "Friction");
     public static readonly LString GameplayOn = LStrings.Create("Gameplay.On", "ON");
     public static readonly LString GameplayOff = LStrings.Create("Gameplay.Off", "OFF");
+
+    // Моды и расширенный UI блоков
+    public static readonly LString MenuModsTab = LStrings.Create("Menu.ModsTab", "Mods");
+    public static readonly LString MenuNoMods = LStrings.Create("Menu.NoMods", "No mods loaded.");
+    public static readonly LString GameplayPlayerPanelTitle = LStrings.Create("Gameplay.PlayerPanelTitle", "Player Panel");
+    public static readonly LString BlockLibraryTitle = LStrings.Create("Block.LibraryTitle", "Block Library (Press B to close)");
+    public static readonly LString BlockLibraryChoosePrompt = LStrings.Create("Block.ChoosePrompt", "Select an item for your Hotbar:");
+    public static readonly LString BlockInfoTitle = LStrings.Create("Block.InfoTitle", "Block Info");
+    public static readonly LString BlockInfoGeometry = LStrings.Create("Block.InfoGeometry", "Geometry: {0}");
+    public static readonly LString BlockInfoMass = LStrings.Create("Block.InfoMass", "Mass: {0} kg");
+    public static readonly LString BlockInfoFriction = LStrings.Create("Block.InfoFriction", "Friction: {0}");
+    public static readonly LString BlockInfoType = LStrings.Create("Block.InfoType", "Type: {0}");
+
+
 }

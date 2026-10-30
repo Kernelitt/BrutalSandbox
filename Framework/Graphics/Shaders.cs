@@ -11,21 +11,23 @@ internal static class Shaders
     
     uniform mat4 mvp;
     uniform mat4 model;
-    uniform mat4 normalMatrix; // Матрица для правильной трансформации нормалей
+    uniform mat4 normalMatrix;
     
     out vec3 vNormal;
     out vec2 vTexCoord;
-    out vec3 vFragPos; // Позиция фрагмента в мировом пространстве для бликов
+    out vec3 vFragPos;
+    out float vVisibility; 
     
     void main()
     {
         gl_Position = mvp * vec4(inPosition, 1.0);
         
-        // Умножаем на матрицу нормалей для корректного вращения без искажения масштабом
         vNormal = normalize(mat3(normalMatrix) * inNormal);
-        
         vFragPos = vec3(model * vec4(inPosition, 1.0));
         vTexCoord = inTexCoord;
+        
+        // Передаем глубину (расстояние до вершины в пространстве отсечения)
+        vVisibility = gl_Position.z;
     }
     """;
 
@@ -35,37 +37,41 @@ internal static class Shaders
     in vec3 vNormal;
     in vec2 vTexCoord;
     in vec3 vFragPos;
+    in float vVisibility;
     
     uniform sampler2D uGameTexture;
-    uniform vec3 uViewPos; // Позиция камеры в мире для расчета бликов
+    uniform vec3 uViewPos;
     
     out vec4 outColor;
+    
+    // Ослабленный туман (границы отодвинуты дальше)
+    const float fogNear = 250.0;
+    const float fogFar = 450.0;
+    const vec3 fogColor = vec3(0.53, 0.81, 0.92); // Sky Blue
     
     void main()
     {
         vec3 n = normalize(vNormal);
-        vec3 lightDir = normalize(vec3(0.35, 0.75, 0.55)); // Направление света
+        vec3 lightDir = normalize(vec3(0.35, 0.75, 0.55));
         
-        // 1. Ambient (Фоновое освещение)
-        float ambientStrength = 0.25;
-        vec3 ambient = ambientStrength * vec3(1.0);
+        float ambientStrength = 0.35;
+        vec3 ambient = ambientStrength * fogColor;
         
-        // 2. Diffuse (Диффузное освещение Ламберта)
         float lambert = max(dot(n, lightDir), 0.0);
         vec3 diffuse = lambert * vec3(1.0);
         
-        // 3. Specular (Зеркальные блики по Блинну-Фонгу)
         vec3 viewDir = normalize(uViewPos - vFragPos);
-        vec3 halfDir = normalize(lightDir + viewDir); // Полувектор
-        float spec = pow(max(dot(n, halfDir), 0.0), 32.0); // 32.0 — жесткость блика
-        vec3 specular = 0.4 * spec * vec3(1.0); // 0.4 — интенсивность блика
+        vec3 halfDir = normalize(lightDir + viewDir);
+        float spec = pow(max(dot(n, halfDir), 0.0), 32.0);
+        vec3 specular = 0.2 * spec * vec3(1.0);
         
-        // Выборка из текстуры
         vec4 texColor = texture(uGameTexture, vTexCoord);
+        vec3 finalObjColor = (ambient + diffuse + specular) * texColor.rgb;
         
-        // Итоговый цвет с учетом всех трех компонент
-        vec3 lighting = (ambient + diffuse + specular) * texColor.rgb;
-        outColor = vec4(lighting, 1.0);
+        float fogFactor = clamp((vVisibility - fogNear) / (fogFar - fogNear), 0.0, 1.0);
+        vec3 finalColorWithFog = mix(finalObjColor, fogColor, fogFactor);
+        
+        outColor = vec4(finalColorWithFog, 1.0);
     }
     """;
 
@@ -86,6 +92,7 @@ internal static class Shaders
     layout(location = 0) out vec3 vNormal;
     layout(location = 1) out vec2 vTexCoord;  
     layout(location = 2) out vec3 vFragPos;
+    layout(location = 3) out float vVisibility; // Передаем фактор для Vulkan
 
     void main()
     {
@@ -97,6 +104,9 @@ internal static class Shaders
         vNormal = normalize(mat3(pc.normalMatrix) * inNormal);
         vFragPos = vec3(pc.model * vec4(inPosition, 1.0));
         vTexCoord = inTexCoord;
+        
+        // Для Vulkan глубина берется из координаты z после трансформации
+        vVisibility = gl_Position.z;
     }
     """;
 
@@ -106,12 +116,15 @@ internal static class Shaders
     layout(location = 0) in vec3 vNormal;
     layout(location = 1) in vec2 vTexCoord; 
     layout(location = 2) in vec3 vFragPos;
+    layout(location = 3) in float vVisibility;
 
     layout(binding = 0) uniform sampler2D uGameTexture;
 
-    // В Vulkan для простоты передаем позицию камеры константой (или через push-constants во фрагментный)
-    // Напрямую зашьем среднюю позицию Orbit-камеры для теста, либо расширим push-constants
     const vec3 viewPos = vec3(8.0, 7.0, 12.0); 
+    
+    const float fogNear = 250.0;
+    const float fogFar = 450.0;
+    const vec3 fogColor = vec3(0.53, 0.81, 0.92);
 
     layout(location = 0) out vec4 outColor;
 
@@ -120,8 +133,8 @@ internal static class Shaders
         vec3 n = normalize(vNormal);
         vec3 lightDir = normalize(vec3(0.35, 0.75, 0.55));
         
-        float ambientStrength = 0.25;
-        vec3 ambient = ambientStrength * vec3(1.0);
+        float ambientStrength = 0.35;
+        vec3 ambient = ambientStrength * fogColor;
         
         float lambert = max(dot(n, lightDir), 0.0);
         vec3 diffuse = lambert * vec3(1.0);
@@ -132,8 +145,12 @@ internal static class Shaders
         vec3 specular = 0.4 * spec * vec3(1.0);
         
         vec4 texColor = texture(uGameTexture, vTexCoord);
+        vec3 finalObjColor = texColor.rgb * (ambient + diffuse + specular);
         
-        outColor = vec4(texColor.rgb * (ambient + diffuse + specular), 1.0);
+        float fogFactor = clamp((vVisibility - fogNear) / (fogFar - fogNear), 0.0, 1.0);
+        vec3 finalColorWithFog = mix(finalObjColor, fogColor, fogFactor);
+        
+        outColor = vec4(finalColorWithFog, 1.0);
     }
     """;
 }

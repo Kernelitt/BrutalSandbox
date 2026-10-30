@@ -87,7 +87,7 @@ public sealed unsafe class OpenGlRenderer : IRenderer
         if (framebufferSize.X <= 0 || framebufferSize.Y <= 0) return;
 
         Resize(framebufferSize.X, framebufferSize.Y);
-        OpenGl.ClearColor(new float4(0.05f, 0.06f, 0.08f, 1f));
+        OpenGl.ClearColor(new float4(0.53f, 0.81f, 0.92f, 1f)); // Небесно-голубой
         OpenGl.Clear(GlClearBit.Color | GlClearBit.Depth);
 
         _currentViewProj = viewProjection;
@@ -100,6 +100,7 @@ public sealed unsafe class OpenGlRenderer : IRenderer
     {
         _currentViewProj = viewProjection;
     }
+
     public void RenderMesh(MeshData data, float4x4 model, string assetName)
     {
         if (data.Vertices.Length == 0 || data.Indices.Length == 0) return;
@@ -196,7 +197,7 @@ public sealed unsafe class OpenGlRenderer : IRenderer
         if (framebufferSize.X <= 0 || framebufferSize.Y <= 0) return;
 
         Resize(framebufferSize.X, framebufferSize.Y);
-        OpenGl.ClearColor(new float4(0.05f, 0.06f, 0.08f, 1f));
+        OpenGl.ClearColor(new float4(0.53f, 0.81f, 0.92f, 1f)); // Небесно-голубой
         OpenGl.Clear(GlClearBit.Color | GlClearBit.Depth);
 
         if (_indexCount > 0)
@@ -240,6 +241,23 @@ public sealed unsafe class OpenGlRenderer : IRenderer
     {
         GlTexture glTex = _assetManager.GetGlTexture(assetName);
         return new ImTextureRef { _TexID = new ImTextureID((nint)glTex.Id) };
+    }
+
+    public void PrepareIconBake(float4x4 viewProjection, float3 cameraPos)
+    {
+        _currentViewProj = viewProjection;
+        _program.Use();
+
+        // Явно передаем позицию камеры в шейдер для расчета освещения Блинна-Фонга
+        if (_viewPosLocation != -1)
+            OpenGl.Uniform(_viewPosLocation, cameraPos);
+
+        _lastBoundVaoId = 0;
+        _lastBoundTextureId = 0;
+    }
+    public ImTextureRef BakeBlockIconToTexture(uint blockId, MeshData mesh, string textureName, float4x4 viewProj)
+    {
+        return default;
     }
     public void Dispose()
     {

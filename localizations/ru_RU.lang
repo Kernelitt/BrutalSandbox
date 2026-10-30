@@ -1,0 +1,48 @@
+# Main Menu
+Menu.Title=Главное Меню игры
+Menu.StartGame=ЗАПУСТИТЬ ИГРУ (ГЕЙМПЛЕЙ)
+Menu.NetworkParams=Параметры Сети:
+Menu.IpAddress=IP Адрес
+Menu.Port=Порт
+Menu.HostServer=ХОСТ (Создать Сервер)
+Menu.ConnectClient=ПОДКЛЮЧИТЬСЯ (Как Клиент)
+Menu.SystemSettings=Настройки системы:
+Menu.Language=Язык (Language):
+Menu.MasterVolume=Общая громкость
+Menu.MusicVolume=Музыка
+Menu.SfxVolume=Эффекты
+Menu.Exit=Выйти из игры
+Menu.HostError=Не удалось создать сервер. Порт {0} занят!
+
+# Credits & Mods
+Menu.CreditsTab=Авторы и Ассеты
+Menu.ModsTab=Модификации
+Menu.NoMods=Модификации не загружены.
+Menu.FrameworkLogo=Фреймворк игры основан на:
+Menu.AssetsTitle=Используемые ассеты и лицензии:
+Menu.AssetMusic1=Музыка: "Investigations" & "Chipper-Doodle" от Kevin MacLeod
+Menu.AssetTextures=Текстуры: Tiny Texture Pack 1 от Screaming Brain Studios
+Menu.OpenWebsite=Перейти на сайт
+
+# Gameplay UI
+Gameplay.BackToMenu=В главное меню
+Gameplay.RenderedChunks=Чанков в рендере: {0}
+Gameplay.Position=Позиция: {0}, {1}, {2}
+Gameplay.FlightMode=Режим полета (F): {0}
+Gameplay.BuildSettings=Настройки строительства (ЛКМ):
+Gameplay.StaticObject=Статический объект (Платформа)
+Gameplay.WeldObject=Скрепить с основанием (Зафиксировать)
+Gameplay.ObjectMass=Масса объекта (кг)
+Gameplay.FrictionCoeff=Коэффициент трения
+Gameplay.On=ВКЛ
+Gameplay.Off=ВЫКЛ
+
+# Block Info Card (Библиотека Блоков)
+Gameplay.PlayerPanelTitle=Панель игрока
+Block.LibraryTitle=Библиотека Блоков (Нажмите B для закрытия)
+Block.ChoosePrompt=Выберите элемент для Хотбара:
+Block.InfoTitle=Свойства Блока
+Block.InfoGeometry=Геометрия: {0}
+Block.InfoMass=Масса по умолчанию: {0} кг
+Block.InfoFriction=Трение материала: {0}
+Block.InfoType=Тип элемента: {0}

@@ -31,6 +31,7 @@ public sealed class PhysicsManager : IDisposable
     {
         if (_instance != null) return;
 
+        // Библиотечная инициализация Jolt подсистемы
         Jolt.RegisterDefaultAllocator();
         Factory.Instance = Factory.Create();
         Jolt.RegisterTypes();
@@ -42,18 +43,22 @@ public sealed class PhysicsManager : IDisposable
     {
         _tempAllocator = TempAllocatorImpl.Create(100 * 1024 * 1024);
 
+        // Пул потоков для многопоточной обработки физики (8 потоков)
         _jobSystem = JobSystemThreadPool.Create(2048, 16, -1);
 
+        // Настройка слоев широкой фазы коллизий
         _broadPhaseLayers = BroadPhaseLayerInterfaceTable.Create(2, 2);
         _broadPhaseLayers.MapObjectToBroadPhaseLayer(LayerStatic, 0);
         _broadPhaseLayers.MapObjectToBroadPhaseLayer(LayerMoving, 1);
 
+        // Настройка фильтрации пар (статическое с движущимся, движущееся с движущимся)
         _pairFilter = ObjectLayerPairFilterTable.Create(2);
         _pairFilter.EnableCollision(LayerStatic, LayerMoving);
         _pairFilter.EnableCollision(LayerMoving, LayerMoving);
 
         _broadPhaseFilter = ObjectVsBroadPhaseLayerFilterTable.Create(_broadPhaseLayers, 2, _pairFilter, 2);
 
+        // Создание и запуск ядра физического движка
         _physicsSystem = PhysicsSystem.Create();
         _physicsSystem.Init(10240, 0, 10240, 10240, _broadPhaseLayers, _broadPhaseFilter, _pairFilter);
 
@@ -68,8 +73,6 @@ public sealed class PhysicsManager : IDisposable
         using var settings = BodyCreationSettings.Create(shapeSettings, position, rotation, motionType, layer);
         var activation = (motionType == MotionType.Static) ? Activation.DontActivate : Activation.Activate;
 
-        // ИСПРАВЛЕНО: Для статических ландшафтов принудительно оптимизируем настройки Broadphase,
-        // чтобы добавление новой земли между чанками не приводило к лагам симуляции кубов.
         if (motionType == MotionType.Static)
         {
             settings.SetIsSensor(false);
@@ -87,6 +90,7 @@ public sealed class PhysicsManager : IDisposable
     /// </summary>
     public void Update(double deltaTime)
     {
+        // Ограничение накопления при сильных лагах / фризах
         _accumulator += Math.Min(deltaTime, 0.25);
 
         while (_accumulator >= TimeStep)
@@ -103,16 +107,17 @@ public sealed class PhysicsManager : IDisposable
 
     public void Dispose()
     {
+
         foreach (var obj in _physicsObjects)
         {
             if (_bodyInterface.IsAdded(obj.BodyId))
             {
-                _bodyInterface.RemoveBody(obj.BodyId);
-                _bodyInterface.DestroyBody(obj.BodyId);
-            }          
+            _bodyInterface.RemoveBody(obj.BodyId);
+            _bodyInterface.DestroyBody(obj.BodyId);
+        }
         }
         _physicsObjects.Clear();
-
+        
         _physicsSystem.Dispose();
         _broadPhaseFilter.Dispose();
         _pairFilter.Dispose();

@@ -1,6 +1,7 @@
 ﻿using Brutal.FmodApi;
-using Brutal.Strings;
+using Brutal.ImGuiApi;
 using Brutal.OpenGlApi;
+using Brutal.Strings;
 using Brutal.TextureApi;
 using System.IO;
 
@@ -17,6 +18,8 @@ public sealed class AssetManager : IDisposable
     private readonly Dictionary<string, GlTexture> _glTextures = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ITexture> _vulkanTextures = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ITexture> _cpuTextures = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, GlTexture> _generatedIconTextures = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<uint, ImTextureRef> _imguiIcons = new();
 
     public AssetManager(string rootAssetsFolder = "assets")
     {
@@ -56,10 +59,31 @@ public sealed class AssetManager : IDisposable
             }
         }
     }
+    public void RegisterGeneratedIconRef(uint blockId, ImTextureRef textureRef)
+    {
+        _imguiIcons[blockId] = textureRef;
+    }
+
+    public ImTextureRef GetGeneratedIconRef(uint blockId)
+    {
+        // Если у нас есть зарегистрированная 3D-иконка (из OpenGL или Vulkan), возвращаем её
+        if (_imguiIcons.TryGetValue(blockId, out var iconRef))
+        {
+            return iconRef;
+        }
+
+        // Откатная логика, если иконка ещё не создана
+        if (_glTextures.TryGetValue("stone_wall", out var glTex))
+        {
+            return new ImTextureRef { _TexID = new ImTextureID((nint)glTex.Id) };
+        }
+
+        return default;
+    }
 
     public unsafe void InitializeTextures(IRenderer renderer)
     {
-        // Проверяем режим
+        // Проверяем режим рендеринга
         bool isGlMode = renderer is OpenGlRenderer;
 
         foreach (var kvp in _texturePaths)
@@ -71,48 +95,85 @@ public sealed class AssetManager : IDisposable
 
             if (!isGlMode)
             {
-                // === РЕЖИМ VULKAN ===
-                // Передаем текстуру рендереру, чтобы он создал VkImage, VkImageView и обновил дескрипторы
+                // === РЕЖИМ VULKAN (РАБОТАЕТ ОТЛИЧНО) ===
                 renderer.InitializeTextureOnDevice(assetName, loadedTex);
                 _vulkanTextures[assetName] = loadedTex;
                 continue;
             }
 
-            // === РЕЖИМ OPENGL ===
-            // (Оставляем ваш текущий рабочий код создания GlTexture...)
+            // === РЕЖИМ OPENGL (СИНХРОНИЗИРОВАН С ЛОГИКОЙ VULKAN) ===
             GlTexture[] glTexturesArray = [default];
             OpenGl.GenTextures(glTexturesArray);
             GlTexture glTexture = glTexturesArray[0];
             OpenGl.BindTexture(OpenGl.GL_TEXTURE_2D, glTexture.Id);
 
-
             int levels = loadedTex.LevelCount > 0 ? loadedTex.LevelCount : 1;
+
             for (var level = 0; level < levels; level++)
             {
                 var width = loadedTex.Extent.X >> level;
                 var height = loadedTex.Extent.Y >> level;
                 if (width <= 0) width = 1;
                 if (height <= 0) height = 1;
+
                 var rawData = loadedTex.ImageData(level, 0, 0);
+                if (rawData.Length == 0) continue;
 
-                int internalFormat; uint pixelFormat; uint dataType = (uint)OpenGl.GL_UNSIGNED_BYTE; int bytesPerChannel = 1;
-                string formatStr = loadedTex.Format.ToString().ToLowerInvariant();
+                // ВЫЧИСЛЯЕМ РЕАЛЬНОЕ КОЛИЧЕСТВО БАЙТ НА ПИКСЕЛЬ (как в вашем коде Vulkan)
+                int bytesPerPixel = rawData.Length / (width * height);
 
-                if (formatStr.Contains("16") || formatStr.Contains("short")) { dataType = 0x1403; bytesPerChannel = 2; }
-                else if (formatStr.Contains("32") || formatStr.Contains("float")) { dataType = 0x1406; bytesPerChannel = 4; }
+                int internalFormat;
+                uint pixelFormat;
+                uint dataType = (uint)OpenGl.GL_UNSIGNED_BYTE;
 
-                if (formatStr.Contains("rgb") && !formatStr.Contains("rgba")) { internalFormat = (bytesPerChannel == 2) ? 0x822D : (bytesPerChannel == 4 ? 0x8815 : (int)OpenGl.GL_RGB8); pixelFormat = (uint)OpenGl.GL_RGB; }
-                else if (formatStr.Contains("bgra")) { internalFormat = (int)OpenGl.GL_RGBA8; pixelFormat = (uint)OpenGl.GL_BGRA; }
-                else { if (bytesPerChannel == 2) internalFormat = 0x805B; else if (bytesPerChannel == 4) internalFormat = 0x8814; else internalFormat = (int)OpenGl.GL_RGBA8; pixelFormat = (uint)OpenGl.GL_RGBA; }
+                byte[] managedArray;
 
-                int channelsCount = (pixelFormat == OpenGl.GL_RGB || pixelFormat == 0x80E0) ? 3 : 4;
-                int bytesPerPixel = channelsCount * bytesPerChannel;
+                // Конвертируем ТАК ЖЕ, КАК В ВАШЕМ VULKAN-РЕНДЕРЕРЕ:
+                // Если в файле физически 3 байта на пиксель (RGB), пересобираем буфер в совместимый 4-канальный RGBA
+                if (bytesPerPixel == 3)
+                {
+                    managedArray = new byte[width * height * 4];
+                    for (int i = 0; i < width * height; i++)
+                    {
+                        if (i * 3 + 2 < rawData.Length)
+                        {
+                            managedArray[i * 4 + 0] = rawData[i * 3 + 0]; // R
+                            managedArray[i * 4 + 1] = rawData[i * 3 + 1]; // G
+                            managedArray[i * 4 + 2] = rawData[i * 3 + 2]; // B
+                            managedArray[i * 4 + 3] = 255;                // A (Непрозрачно)
+                        }
+                    }
 
-                OpenGl.PixelStorei(OpenGl.GL_UNPACK_ALIGNMENT, (bytesPerPixel % 4 == 0) ? 4 : 1);
-                OpenGl.PixelStorei(OpenGl.GL_UNPACK_ROW_LENGTH, (rawData.Length / height) / bytesPerPixel);
+                    internalFormat = (int)OpenGl.GL_RGBA8;
+                    pixelFormat = (uint)OpenGl.GL_RGBA;
+                }
+                else
+                {
+                    // Для grass_tile, stone_wall и остальных изначально 4-канальных текстур
+                    string formatStr = loadedTex.Format.ToString().ToLowerInvariant();
+                    if (formatStr.Contains("bgra"))
+                    {
+                        internalFormat = (int)OpenGl.GL_RGBA8;
+                        pixelFormat = (uint)OpenGl.GL_BGRA;
+                    }
+                    else
+                    {
+                        internalFormat = (int)OpenGl.GL_RGBA8;
+                        pixelFormat = (uint)OpenGl.GL_RGBA;
+                    }
 
-                fixed (byte* ptr = rawData)
+                    // Переводим Span в управляемый стабильный массив C# .ToArray()
+                    managedArray = rawData.ToArray();
+                }
+
+                // Выставляем стандартные безопасные параметры выравнивания под 4-байтовую RGBA сетку
+                OpenGl.PixelStorei(OpenGl.GL_UNPACK_ALIGNMENT, 4);
+                OpenGl.PixelStorei(OpenGl.GL_UNPACK_ROW_LENGTH, 0);
+
+                fixed (byte* ptr = managedArray)
+                {
                     OpenGl.TexImage2D(OpenGl.GL_TEXTURE_2D, level, internalFormat, width, height, 0, pixelFormat, dataType, ptr);
+                }
             }
 
             OpenGl.TexParameterFloat(OpenGl.GL_TEXTURE_2D, OpenGl.GL_TEXTURE_MAX_LEVEL, levels - 1);
@@ -122,9 +183,10 @@ public sealed class AssetManager : IDisposable
             OpenGl.TexParameterFloat(OpenGl.GL_TEXTURE_2D, OpenGl.GL_TEXTURE_WRAP_T, (int)OpenGl.GL_REPEAT);
 
             _glTextures[assetName] = glTexture;
-            TextureLoader.Unload(loadedTex); // Для GL выгружаем из CPU RAM, так как копия уже в GPU
+            TextureLoader.Unload(loadedTex);
         }
 
+        // Возвращаем дефолтное выравнивание для корректной отрисовки шрифтов и интерфейса ImGui
         if (isGlMode) OpenGl.PixelStorei(OpenGl.GL_UNPACK_ALIGNMENT, 4);
         _texturePaths.Clear();
     }

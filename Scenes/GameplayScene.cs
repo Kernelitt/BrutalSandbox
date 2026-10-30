@@ -30,6 +30,7 @@ public sealed class GameplayScene : IScene
     private readonly TerrainManager _terrainManager = new();
     private readonly Frustum _frustum = new();
     private readonly FirstPersonController _player = new();
+    private ConstructionManager _constructionManager;
 
     private MeshData _graphicCubeMesh;
     private MeshData _graphicCapsuleMesh;
@@ -39,13 +40,13 @@ public sealed class GameplayScene : IScene
     private bool _fWasPressed = false;
     private float _networkTickTimer = 0f;
     private const float NetworkTickRate = 1f / 30f;
-    private uint _buildIdCounter = 5000;      
-    private uint _platformIdCounter = 10000;  
 
-    private float _buildMass = 5.0f;      
-    private float _buildFriction = 0.3f; 
-    private bool _buildIsStatic = false;
-    private bool _buildIsWelded = false;
+    // Слоты хотбара (хранят ID блоков)
+    private readonly uint[] _hotbarSlots = [1, 2, 3, 4, 5, 6, 7];
+    private int _activeHotbarIndex = 0;
+    private bool _isBlockMenuOpen = false;
+    private bool _bWasPressed = false;
+
     public struct WeldLink
     {
         public uint ParentNetId;
@@ -55,12 +56,20 @@ public sealed class GameplayScene : IScene
 
 
     private readonly Dictionary<uint, WeldLink> _weldLinks = new();
-
-
-
     private readonly Dictionary<uint, uint> _networkedCubes = new();
     private readonly Dictionary<uint, LerpedCubeVisual> _cubeVisuals = new();
-    public GameplayScene(MainApp app) => _app = app;
+    private readonly Dictionary<uint, uint> _cubeBlockIds = new();
+    public Dictionary<uint, uint> GetCubeBlockIds() => _cubeBlockIds;
+    public Dictionary<uint, uint> GetNetworkedCubes() => _networkedCubes;
+
+    // Авторитарная генерация ID на стороне сервера для клиентских построек
+
+    public GameplayScene(MainApp app)
+    {
+        _app = app;
+        _constructionManager = new ConstructionManager(_app, _terrainManager, _networkedCubes, _cubeBlockIds, _weldLinks);
+    }
+
 
     public void Initialize()
     {
@@ -68,67 +77,53 @@ public sealed class GameplayScene : IScene
         _graphicCapsuleMesh = PrimitiveGenerator.CreateCapsule(1.0f, 0.4f);
 
         _player.Initialize();
-
-        if (!_app.Network.IsActive || _app.Network.IsServer)
-        {
-            BuildPhysicsSceneFromServer();
-        }
     }
-
-    private void BuildPhysicsSceneFromServer()
-    {
-        var phys = PhysicsManager.Instance;
-        var boxHalfSize = new float3(0.5f);
-        uint networkIdCounter = 1000;
-
-        using (var boxShapeSettings = BoxShapeSettings.Create(boxHalfSize, 0.05f, default))
-        {
-            foreach (int i in System.Linq.Enumerable.Range(0, 25))
-            {
-                uint bodyId = phys.CreateBody(
-                    boxShapeSettings,
-                    new float3(32f, 45f + (i * 2.2f), 35f),
-                    floatQuat.Identity,
-                    MotionType.Dynamic,
-                    PhysicsManager.LayerMoving,
-                    "stone_wall"
-                );
-
-                _networkedCubes[networkIdCounter] = bodyId;
-                networkIdCounter++;
-            }
-        }
-    }
-
     public float4x4 GetViewProjection(float aspectRatio)
     {
         float4x4 view = _player.GetViewMatrix();
         float4x4 projection = float4x4.CreatePerspectiveFieldOfView(MathF.PI / 3.5f, aspectRatio, 0.1f, 1000f);
         return view * projection;
     }
+    public uint GenerateNextNetworkId(uint blockId)
+    {
+        BlockData block = BlockRegistry.GetById(blockId);
 
+        // Вызываем приватные счетчики ConstructionManager
+        // Для этого нужно будет сделать свойства или методы в ConstructionManager, либо генерировать их здесь.
+        // Самый простой способ — делегировать это нашему ConstructionManager:
+        return _constructionManager.AllocateServerId(block.Shape == BlockShape.Platform);
+    }
     public unsafe void Update(float deltaTime)
     {
         _app.Network.Update();
 
         PhysicsManager.Instance.Update(deltaTime);
-
+        var phys = PhysicsManager.Instance;
         while (_app.Network.IncomingBuildCommands.TryDequeue(out var buildCmd))
         {
             if (!_networkedCubes.ContainsKey(buildCmd.NetId))
             {
-                SpawnCubeLocal(buildCmd.NetId, buildCmd.Position, buildCmd.Mass, buildCmd.Friction, buildCmd.IsStatic, buildCmd.ParentNetId);
+                // Теперь мы берем оригинальный, валидный ID блока напрямую без кастов во float
+                uint blockId = buildCmd.BlockId;
+                _cubeBlockIds[buildCmd.NetId] = blockId;
+
+                BlockData block = BlockRegistry.GetById(blockId);
+                bool networkIsStatic = buildCmd.IsStatic;
+
+                Console.WriteLine($"[ОТЛАДКА СЦЕНЫ] Успешный спавн из структуры. ID: {buildCmd.NetId}, Истинный BlockID: {blockId}, Static: {networkIsStatic}");
+
+                SpawnCubeLocal(buildCmd.NetId, buildCmd.Position, block.DefaultMass, block.DefaultFriction, networkIsStatic, buildCmd.ParentNetId, blockId);
             }
         }
 
-        // 3. Считываем команды разрушения
+
+
         while (_app.Network.IncomingDestroyCommands.TryDequeue(out var netId))
         {
             if (_networkedCubes.TryGetValue(netId, out uint bodyId))
             {
-                var phys = PhysicsManager.Instance;
-
                 _weldLinks.Remove(netId);
+                _cubeBlockIds.Remove(netId); // Очистка ID
 
                 phys.BodyInterface.RemoveBody(bodyId);
                 phys.BodyInterface.DestroyBody(bodyId);
@@ -136,9 +131,9 @@ public sealed class GameplayScene : IScene
             }
         }
 
+
         if (!_app.Network.IsActive || _app.Network.IsServer)
         {
-            var phys = PhysicsManager.Instance;
             foreach (var kvp in _weldLinks)
             {
                 uint childNetId = kvp.Key;
@@ -174,23 +169,27 @@ public sealed class GameplayScene : IScene
             }
             else
             {
-                // КЛИЕНТ: Корректируем физику Jolt и гасим фантомные кочки ландшафта
-                var phys = PhysicsManager.Instance;
-                var boxHalfSize = new float3(0.5f);
+
+                // СИНХРОНИЗАЦИЯ АКТИВНЫХ ОБЪЕКТОВ ДЛЯ КЛИЕНТА
+                var receivedNetIds = new HashSet<uint>();
+
+                // Важно: Безопасно проверяем, есть ли вообще данные от сервера в этом кадре
+                bool hasNetworkState = _app.Network.NetworkedCubesState.Count > 0;
 
                 foreach (var kvp in _app.Network.NetworkedCubesState)
                 {
                     uint netId = kvp.Key;
                     NetworkCubeState serverState = kvp.Value;
+                    receivedNetIds.Add(netId);
 
                     if (!_networkedCubes.TryGetValue(netId, out uint bodyId))
                     {
-                        using (var boxShapeSettings = BoxShapeSettings.Create(boxHalfSize, 0.05f, default))
-                        {
-                            bodyId = phys.CreateBody(boxShapeSettings, serverState.Position, serverState.Rotation, MotionType.Dynamic, PhysicsManager.LayerMoving, "stone_wall");
-                        }
-                        phys.BodyInterface.ActivateBody(bodyId);
-                        _networkedCubes[netId] = bodyId;
+                        continue; // Ждем BuildObject, это правильно и защищает от кубов-пустышек
+                    }
+
+                    if (phys.BodyInterface.GetMotionType(bodyId) == MotionType.Static)
+                    {
+                        continue;
                     }
 
                     phys.BodyInterface.GetPositionAndRotation(bodyId, out float3 clientPos, out _);
@@ -207,24 +206,49 @@ public sealed class GameplayScene : IScene
                     else
                     {
                         float3 targetLinearVel = serverState.LinearVelocity + (posError * 5.0f);
-
-                        float3 currentLocalVel = phys.BodyInterface.GetLinearVelocity(bodyId);
-
-                        if (currentLocalVel.Y > 1.5f && serverState.LinearVelocity.Y <= 0.2f)
-                        {
-                            targetLinearVel.Y = serverState.LinearVelocity.Y;
-                        }
-
                         phys.BodyInterface.SetLinearVelocity(bodyId, targetLinearVel);
                         phys.BodyInterface.SetAngularVelocity(bodyId, serverState.AngularVelocity);
-                        phys.BodyInterface.SetPositionAndRotation(bodyId, clientPos, serverState.Rotation, Activation.DontActivate);
+                        phys.BodyInterface.SetPositionAndRotation(bodyId, clientPos, serverState.Rotation, Activation.Activate);
                     }
                 }
-            }
 
+
+            }
         }
 
-        _player.UpdateLogic(_app.Window, deltaTime, _terrainManager);
+    
+
+
+    _player.UpdateLogic(_app.Window, deltaTime, _terrainManager);
+
+        foreach (var kvp in _networkedCubes)
+        {
+            uint netId = kvp.Key;
+            uint bodyId = kvp.Value;
+
+            // Если это не тело игрока, считываем актуальные координаты из симуляции Jolt
+            if (bodyId != _player.PhysicsBodyId)
+            {
+                phys.BodyInterface.GetPositionAndRotation(bodyId, out float3 realPos, out floatQuat realRot);
+
+                // Если у вас в LerpedCubeVisual или другом кэше обновляются позиции — 
+                // сохраняем их сюда, чтобы метод Render и рейкаст использовали строго ОДИНАКОВЫЕ координаты.
+                if (_cubeVisuals.TryGetValue(netId, out var visual))
+                {
+                    visual.CurrentPos = realPos;
+                    visual.CurrentRot = realRot;
+                    _cubeVisuals[netId] = visual;
+                }
+                else
+                {
+                    _cubeVisuals[netId] = new LerpedCubeVisual
+                    {
+                        CurrentPos = realPos,
+                        CurrentRot = realRot
+                    };
+                }
+            }
+        }
 
         if (_app.Network.IsActive)
         {
@@ -234,38 +258,39 @@ public sealed class GameplayScene : IScene
 
 
 
-    private void SpawnCubeLocal(uint netId, float3 position, float mass, float friction, bool isStatic, uint parentNetId)
+    // ИСПРАВЛЕНИЕ: Передаем blockId аргументом, чтобы не читать его из чужого хотбара
+    private void SpawnCubeLocal(uint netId, float3 position, float mass, float friction, bool isStatic, uint parentNetId, uint blockId)
     {
         var phys = PhysicsManager.Instance;
-        float3 boxHalfSize = isStatic ? new float3(1.5f, 0.1f, 1.5f) : new float3(0.5f);
         MotionType motionType = isStatic ? MotionType.Static : MotionType.Dynamic;
         ushort layer = isStatic ? PhysicsManager.LayerStatic : PhysicsManager.LayerMoving;
 
         float3 finalSpawnPos = position;
 
+        // СТРОКУ НИЖЕ УДАЛЯЕМ/ЗАМЕНЯЕМ НА ИСПОЛЬЗОВАНИЕ ПАРАМЕТРА blockId
+        // uint blockId = _constructionManager.SelectedBlockId; 
+
         if (parentNetId != 0 && _networkedCubes.TryGetValue(parentNetId, out uint parentBodyId))
         {
             phys.BodyInterface.GetPositionAndRotation(parentBodyId, out float3 parentPos, out floatQuat parentRot);
-
             float3 worldOffset = position - parentPos;
             floatQuat invParentRot = floatQuat.Inverse(parentRot);
             float3 localOffset = float3.Transform(worldOffset, invParentRot);
 
-            bool isParentPlatform = parentNetId >= 10000;
+            BlockData currentBlock = BlockRegistry.GetById(blockId);
 
-            localOffset.X = MathF.Round(localOffset.X);
-            localOffset.Z = MathF.Round(localOffset.Z);
-
-            if (isParentPlatform)
+            if (currentBlock.Shape == BlockShape.Cube)
             {
-                float targetStep = 0.6f;
-                localOffset.Y = MathF.Round(localOffset.Y / targetStep) * targetStep;
-            }
-            else
-            {
+                localOffset.X = MathF.Round(localOffset.X);
                 localOffset.Y = MathF.Round(localOffset.Y);
+                localOffset.Z = MathF.Round(localOffset.Z);
             }
-
+            else if (currentBlock.Shape == BlockShape.Platform)
+            {
+                localOffset.X = MathF.Round(localOffset.X / 3.0f) * 3.0f;
+                localOffset.Z = MathF.Round(localOffset.Z / 3.0f) * 3.0f;
+                localOffset.Y = MathF.Round(localOffset.Y * 5f) / 5f;
+            }
             finalSpawnPos = parentPos + float3.Transform(localOffset, parentRot);
 
             _weldLinks[netId] = new WeldLink
@@ -276,10 +301,29 @@ public sealed class GameplayScene : IScene
             };
         }
 
-        using (var boxShapeSettings = BoxShapeSettings.Create(boxHalfSize, 0.05f, default))
+        _cubeBlockIds[netId] = blockId; // Сохраняем переданный ID для рендера
+
+        BlockData block = BlockRegistry.GetById(blockId);
+        ShapeSettings shapeSettings;
+
+        switch (block.Shape)
         {
-            uint bodyId = phys.CreateBody(boxShapeSettings, finalSpawnPos, floatQuat.Identity, motionType, layer, "stone_wall");
-            phys.BodyInterface.SetFriction(bodyId, friction);
+            case BlockShape.Platform:
+                shapeSettings = BoxShapeSettings.Create(new float3(1.5f, 0.1f, 1.5f), 0.05f, default);
+                break;
+            case BlockShape.Capsule:
+                shapeSettings = CapsuleShapeSettings.Create(0.5f, 0.4f, default);
+                break;
+            case BlockShape.Cube:
+            default:
+                shapeSettings = BoxShapeSettings.Create(new float3(0.5f), 0.05f, default);
+                break;
+        }
+
+        using (shapeSettings)
+        {
+            uint bodyId = phys.CreateBody(shapeSettings, finalSpawnPos, floatQuat.Identity, motionType, layer, block.TextureName);
+            phys.BodyInterface.SetFriction(bodyId, block.DefaultFriction);
 
             if (motionType == MotionType.Dynamic)
             {
@@ -333,141 +377,6 @@ public sealed class GameplayScene : IScene
         _app.Network.SendRawPacket(buffer, true);
     }
 
-    private unsafe void ExecuteConstructionRaycast(bool isPlaceMode)
-    {
-        float cosPitch = MathF.Cos(_player.Pitch);
-        float sinPitch = MathF.Sin(_player.Pitch);
-        float cosYaw = MathF.Cos(_player.Yaw);
-        float sinYaw = MathF.Sin(_player.Yaw);
-
-        float3 forward = new float3(sinYaw * cosPitch, sinPitch, cosYaw * cosPitch);
-        float3 rayStart = _player.Position + new float3(0f, 0.88f, 0f); // Из глаз
-        float maxRayDistance = 15f;
-
-        var phys = PhysicsManager.Instance;
-
-        uint hitBodyId = 0;
-        float closestT = 1.0f; 
-        float3 hitNormal = new float3(0f, 1f, 0f);
-
-        foreach (var kvp in _networkedCubes)
-        {
-            uint bodyId = kvp.Value;
-            if (bodyId == _player.PhysicsBodyId) continue;
-
-            phys.BodyInterface.GetPositionAndRotation(bodyId, out float3 center, out floatQuat rotation);
-
-            bool isPlatform = phys.BodyInterface.GetMotionType(bodyId) == MotionType.Static;
-
-            float3 halfExtents = isPlatform ? new float3(1.5f, 0.1f, 1.5f) : new float3(0.5f);
-
-            float3 boxMin = center - halfExtents;
-            float3 boxMax = center + halfExtents;
-
-            if (RayCasting.RayIntersectsScaledBox(rayStart, forward, boxMin, boxMax, out float t, out float3 normal))
-            {
-                if (t < closestT && t > 0.01f)
-                {
-                    closestT = t;
-                    hitBodyId = bodyId;
-                    hitNormal = normal;
-                }
-            }
-        }
-
-        float3 hitPoint;
-        uint targetNetId = 0;
-        bool hasHit = false;
-        hitPoint = rayStart + (forward * (closestT * maxRayDistance));
-
-        if (hitBodyId != 0)
-        {
-            hasHit = true;
-            foreach (var kvp in _networkedCubes)
-            {
-                if (kvp.Value == hitBodyId) { targetNetId = kvp.Key; break; }
-            }
-        }
-        else
-        {
-            for (float d = 1f; d <= maxRayDistance; d += 0.1f)
-            {
-                float3 checkPoint = rayStart + (forward * d);
-                float terrainHeight = _terrainManager.GetTerrainHeightAt(checkPoint.X, checkPoint.Z);
-
-                if (checkPoint.Y <= terrainHeight)
-                {
-                    hitPoint = checkPoint;
-                    hitNormal = new float3(0f, 1f, 0f);
-                    hasHit = true;
-                    break;
-                }
-            }
-        }
-
-        if (!hasHit) return;
-
-        if (isPlaceMode)
-        {
-            float offsetDistance = _buildIsStatic ? 0.1f : 0.5f;
-            float3 spawnPos = hitPoint + (hitNormal * offsetDistance);
-
-            uint parentCubeId = (_buildIsWelded && !_buildIsStatic && hitBodyId != 0) ? targetNetId : 0;
-
-            if (parentCubeId == 0)
-            {
-                spawnPos = new float3(MathF.Round(spawnPos.X), MathF.Round(spawnPos.Y), MathF.Round(spawnPos.Z));
-                if (hitBodyId == 0 && hitNormal.Y > 0.9f) spawnPos.Y += 0.02f;
-            }
-
-            uint newNetId = _buildIsStatic ? _platformIdCounter++ : _buildIdCounter++;
-
-            if (_app.Network.IsActive)
-            {
-                if (_app.Network.IsServer)
-                {
-                    SpawnCubeLocal(newNetId, spawnPos, _buildMass, _buildFriction, _buildIsStatic, parentCubeId);
-                    _app.Network.SendBuildOrDestroyToAll(newNetId, spawnPos, true, default, _buildMass, _buildFriction, _buildIsStatic, parentCubeId);
-                }
-                else
-                {
-                    _app.Network.SendBuildOrDestroyToAll(newNetId, spawnPos, true, default, _buildMass, _buildFriction, _buildIsStatic, parentCubeId);
-                }
-            }
-            else
-            {
-                SpawnCubeLocal(newNetId, spawnPos, _buildMass, _buildFriction, _buildIsStatic, parentCubeId);
-            }
-        }
-        else
-        {
-            if (hitBodyId != 0 && targetNetId >= 1000)
-            {
-                if (_app.Network.IsActive)
-                {
-                    if (_app.Network.IsServer)
-                    {
-                        phys.BodyInterface.RemoveBody(hitBodyId);
-                        phys.BodyInterface.DestroyBody(hitBodyId);
-                        _networkedCubes.Remove(targetNetId);
-
-                        _app.Network.SendBuildOrDestroyToAll(targetNetId, float3.Zero, false, default);
-                    }
-                    else
-                    {
-                        _app.Network.SendBuildOrDestroyToAll(targetNetId, float3.Zero, false, default);
-                    }
-                }
-                else
-                {
-                    phys.BodyInterface.RemoveBody(hitBodyId);
-                    phys.BodyInterface.DestroyBody(hitBodyId);
-                    _networkedCubes.Remove(targetNetId);
-                }
-            }
-        }
-    }
-
     public void Render(IRenderer renderer, float4x4 viewProj)
     {
         _frustum.Update(viewProj);
@@ -484,82 +393,245 @@ public sealed class GameplayScene : IScene
         }
 
         var phys = PhysicsManager.Instance;
-        float dt = ImGui.GetIO().DeltaTime; 
+        float dt = ImGui.GetIO().DeltaTime;
 
         foreach (var (netId, bodyId) in _networkedCubes)
         {
             if (bodyId == _player.PhysicsBodyId) continue;
 
-            phys.BodyInterface.GetPositionAndRotation(bodyId, out var position, out var rotation);
+            // Рендерим строго по тем координатам, которые зафиксированы в Update симуляции
+            float3 position = float3.Zero;
+            floatQuat rotation = floatQuat.Identity;
+
+            if (_cubeVisuals.TryGetValue(netId, out var visual))
+            {
+                position = visual.CurrentPos;
+                rotation = visual.CurrentRot;
+            }
+            else
+            {
+                // Фоллбэк на случай, если объект только что создался
+                phys.BodyInterface.GetPositionAndRotation(bodyId, out position, out rotation);
+            }
+
             if (!_frustum.IsBoxVisible(position - new float3(2f), position + new float3(2f))) continue;
 
-            // Определяем тип движения тела для масштабирования меша
-            bool isObjectStatic = phys.BodyInterface.GetMotionType(bodyId) == MotionType.Static;
-            bool isWidePlatform = phys.BodyInterface.GetMotionType(bodyId) == MotionType.Static && netId >= 10000;
+            // Прямое получение данных о блоке
+            if (!_cubeBlockIds.TryGetValue(netId, out uint blockId))
+                blockId = 1;
 
-            float4x4 scale = isWidePlatform ? float4x4.CreateScale(3.0f, 0.2f, 3.0f) : float4x4.Identity;
+            BlockData block = BlockRegistry.GetById(blockId);
+            MeshData targetMesh = _graphicCubeMesh;
+            float4x4 scale = float4x4.Identity;
+
+            if (block.Shape == BlockShape.Platform)
+            {
+                scale = float4x4.CreateScale(3.0f, 0.2f, 3.0f);
+            }
+            else if (block.Shape == BlockShape.Capsule)
+            {
+                targetMesh = _graphicCapsuleMesh;
+            }
+
             float4x4 model = scale * float4x4.CreateFromQuaternion(rotation) * float4x4.CreateTranslation(position);
-            renderer.RenderMesh(_graphicCubeMesh, model, "stone_wall");
+            renderer.RenderMesh(targetMesh, model, block.TextureName);
         }
 
-        foreach (var (addressStr, pos) in _app.Network.RemotePlayerPositions)
+        foreach (var kvp in _app.Network.RemotePlayerPositions)
         {
-            if (!_frustum.IsBoxVisible(pos - new float3(1f), pos + new float3(2f))) continue;
+            float3 remotePlayerPos = kvp.Value;
 
-            float4x4 model = float4x4.CreateTranslation(pos);
-            renderer.RenderMesh(_graphicCapsuleMesh, model, "stone_wall");
+            // Проверяем видимость игрока камерой во избежание лишней нагрузки на GPU
+            if (!_frustum.IsBoxVisible(remotePlayerPos - new float3(1f, 2f, 1f), remotePlayerPos + new float3(1f, 2f, 1f)))
+                continue;
+
+            // Игроки рендерятся стандартной текстурой "stone_wall" в форме капсулы
+            float4x4 playerModelMatrix = float4x4.CreateTranslation(remotePlayerPos);
+            renderer.RenderMesh(_graphicCapsuleMesh, playerModelMatrix, "stone_wall");
         }
     }
-
     public void RenderUi()
     {
         ImGui.SetNextWindowPos(new float2(10, 10), ImGuiCond.FirstUseEver);
 
-        // Заголовок панели игрока берется из старого общего класса или можно оставить сырым/кастомным
-        if (ImGui.Begin("Панель игрока"u8))
+        // ИСПРАВЛЕНИЕ: Локализован заголовок панели игрока
+        if (ImGui.Begin(LocalizationKeys.GameplayPlayerPanelTitle.ToUtf8()))
         {
             if (ImGui.Button(LocalizationKeys.GameplayBackToMenu.ToUtf8())) _app.ChangeScene(GameState.MainMenu);
             ImGui.Separator();
 
-            // Динамическое форматирование количества чанков
             ImGui.Text(string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.GameplayRenderedChunks.ToUtf8()), _renderedChunksCount));
-
-            // Координаты позиции игрока
             ImGui.Text(string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.GameplayPosition.ToUtf8()), _player.Position.X.ToString("F1"), _player.Position.Y.ToString("F1"), _player.Position.Z.ToString("F1")));
 
-            // Статус режима полета
             string flightStatus = _player.IsNoclip ? System.Text.Encoding.UTF8.GetString(LocalizationKeys.GameplayOn.ToUtf8()) : System.Text.Encoding.UTF8.GetString(LocalizationKeys.GameplayOff.ToUtf8());
             ImGui.Text(string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.GameplayFlightMode.ToUtf8()), flightStatus));
 
             ImGui.Separator();
             ImGui.Text(LocalizationKeys.GameplayBuildSettings.ToUtf8());
 
-            ImGui.Checkbox(LocalizationKeys.GameplayStaticObject.ToUtf8(), ref _buildIsStatic);
-            if (!_buildIsStatic)
-            {
-                ImGui.Checkbox(LocalizationKeys.GameplayWeldObject.ToUtf8(), ref _buildIsWelded);
-                ImGui.SliderFloat(LocalizationKeys.GameplayObjectMass.ToUtf8(), ref _buildMass, 0.1f, 500f, "%.1f"u8);
-            }
-            else
-            {
-                _buildIsWelded = false;
-            }
+            bool staticObj = _constructionManager.BuildIsStatic;
+            if (ImGui.Checkbox(LocalizationKeys.GameplayStaticObject.ToUtf8(), ref staticObj))
+                _constructionManager.BuildIsStatic = staticObj;
 
-            ImGui.SliderFloat(LocalizationKeys.GameplayFrictionCoeff.ToUtf8(), ref _buildFriction, 0.0f, 1.0f, "%.2f"u8);
+            bool weldObj = _constructionManager.BuildIsWelded;
+            if (ImGui.Checkbox(LocalizationKeys.GameplayWeldObject.ToUtf8(), ref weldObj))
+                _constructionManager.BuildIsWelded = weldObj;
+        }
+        ImGui.End();
+
+        // УЛУЧШЕННОЕ МЕНЮ БИБЛИОТЕКИ БЛОКОВ
+        if (_isBlockMenuOpen)
+        {
+            // Фиксируем оптимальный размер окна под 10 колонок
+            ImGui.SetNextWindowSize(new float2(980, 480), ImGuiCond.Always);
+
+            // ИСПРАВЛЕНИЕ: Локализован заголовок окна библиотеки блоков
+            if (ImGui.Begin(LocalizationKeys.BlockLibraryTitle.ToUtf8(), ref _isBlockMenuOpen, ImGuiWindowFlags.NoResize))
+            {
+                // Разделяем экран: Слева — сетка 10xX (720px), Справа — инфо-карточка (240px)
+                ImGui.Columns(2, "menuSplit"u8, true);
+                ImGui.SetColumnWidth(0, 720f);
+
+                // ИСПРАВЛЕНИЕ: Локализована строка приглашения к выбору хотбара
+                ImGui.Text(LocalizationKeys.BlockLibraryChoosePrompt.ToUtf8());
+                ImGui.Separator();
+
+                // Скроллируемый контейнер для сетки блоков
+                ImGui.BeginChild("BlockGridRegion"u8, new float2(0, -10), ImGuiChildFlags.Borders);
+
+                uint hoveredBlockId = _constructionManager.SelectedBlockId;
+                int columnsCount = 10; // Идеальная сетка 10 на X
+
+                for (int i = 0; i < BlockRegistry.RegisteredBlocks.Count; i++)
+                {
+                    var block = BlockRegistry.RegisteredBlocks[i];
+                    ImGui.PushID((int)block.Id);
+
+                    ImTextureRef texRef = _app.AssetManager.GetGeneratedIconRef(block.Id);
+
+                    bool isSelected = _constructionManager.SelectedBlockId == block.Id;
+                    if (isSelected) ImGui.PushStyleColor(ImGuiCol.Button, new float4(1f, 0.7f, 0f, 0.6f));
+
+                    float2 uv0 = new float2(0f, 1f);
+                    float2 uv1 = new float2(1f, 0f);
+
+                    // Компактные квадратные кнопки 60x60
+                    if (ImGui.ImageButton("##gridBtn"u8, texRef, new float2(60, 60), uv0, uv1))
+                    {
+                        _hotbarSlots[_activeHotbarIndex] = block.Id;
+                        _constructionManager.SelectedBlockId = block.Id;
+                    }
+
+                    if (isSelected) ImGui.PopStyleColor();
+
+                    if (ImGui.IsItemHovered())
+                    {
+                        hoveredBlockId = block.Id;
+                    }
+
+                    // Перенос на новую строку строго каждые 10 элементов
+                    if ((i + 1) % columnsCount != 0 && (i + 1) < BlockRegistry.RegisteredBlocks.Count)
+                    {
+                        ImGui.SameLine();
+                    }
+
+                    ImGui.PopID();
+                }
+                ImGui.EndChild();
+
+                ImGui.NextColumn();
+
+                // ПРАВАЯ КОЛОНКА: Информационная карточка с полной локализацией
+                BlockData infoBlock = BlockRegistry.GetById(hoveredBlockId);
+                ImGui.TextColored(new float4(1f, 0.8f, 0f, 1f), LocalizationKeys.BlockInfoTitle.Localized);
+                ImGui.Separator();
+                ImGui.Spacing();
+
+                // Исправлено ошибочное форматирование: заменяем вызов BlockInfoTitle на вывод имени блока из реестра
+                ImGui.Text(infoBlock.Name);
+                ImGui.Spacing();
+                ImGui.Text(string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.BlockInfoGeometry.ToUtf8()), infoBlock.Shape));
+                ImGui.Text(string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.BlockInfoMass.ToUtf8()), infoBlock.DefaultMass));
+                ImGui.Text(string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.BlockInfoFriction.ToUtf8()), infoBlock.DefaultFriction));
+            }
+            ImGui.End();
+        }
+
+        // Хотбар на нижней грани экрана
+        var io = ImGui.GetIO();
+        ImGui.SetNextWindowPos(new float2(io.DisplaySize.X / 2f - 270f, io.DisplaySize.Y - 75f), ImGuiCond.Always);
+        ImGui.SetNextWindowSize(new float2(540, 70), ImGuiCond.Always);
+
+        ImGuiWindowFlags hotbarFlags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize |
+                                       ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoScrollbar |
+                                       ImGuiWindowFlags.NoSavedSettings;
+
+        if (ImGui.Begin("HotbarWindow"u8, hotbarFlags))
+        {
+            ImGui.Columns(7, "slots"u8, false);
+            for (int i = 0; i < 7; i++)
+            {
+                uint blockId = _hotbarSlots[i];
+                var block = BlockRegistry.GetById(blockId);
+
+                ImTextureRef blockTextureRef = _app.AssetManager.GetGeneratedIconRef(block.Id);
+                ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new float2(0, 0));
+
+                float2 uv0 = new float2(0f, 1f);
+                float2 uv1 = new float2(1f, 0f);
+
+                if (ImGui.ImageButton($"##slotimg{i}", blockTextureRef, new float2(50, 50), uv0, uv1))
+                {
+                    _activeHotbarIndex = i;
+                    _constructionManager.SelectedBlockId = blockId;
+                }
+
+                ImGui.PopStyleVar();
+
+                if (i == _activeHotbarIndex)
+                {
+                    float2 pMin = ImGui.GetItemRectMin();
+                    float2 pMax = ImGui.GetItemRectMax();
+                    ImGui.GetWindowDrawList().AddRect(pMin, pMax, 0xFF00DFFF, 0f, 0, 2f);
+                }
+                ImGui.NextColumn();
+            }
         }
         ImGui.End();
 
         var drawList = ImGui.GetForegroundDrawList();
-        var io = ImGui.GetIO();
         float2 center = new float2(io.DisplaySize.X / 2f, io.DisplaySize.Y / 2f);
         drawList.AddCircleFilled(center, 3f, 0xFFFFFFFF);
     }
+
 
     private bool _lmbWasPressed = false;
     private bool _rmbWasPressed = false;
 
     public void HandleInput(GlfwWindow window, double2 cursorDelta, bool shiftHeld, bool dragging)
     {
+        // Переключение слотов хотбара цифровыми клавишами
+        if (window.GetKey(GlfwKey.Number1) == GlfwKeyAction.Press) { _activeHotbarIndex = 0; _constructionManager.SelectedBlockId = _hotbarSlots[0]; }
+        if (window.GetKey(GlfwKey.Number2) == GlfwKeyAction.Press) { _activeHotbarIndex = 1; _constructionManager.SelectedBlockId = _hotbarSlots[1]; }
+        if (window.GetKey(GlfwKey.Number3) == GlfwKeyAction.Press) { _activeHotbarIndex = 2; _constructionManager.SelectedBlockId = _hotbarSlots[2]; }
+        if (window.GetKey(GlfwKey.Number4) == GlfwKeyAction.Press) { _activeHotbarIndex = 3; _constructionManager.SelectedBlockId = _hotbarSlots[3]; }
+        if (window.GetKey(GlfwKey.Number5) == GlfwKeyAction.Press) { _activeHotbarIndex = 4; _constructionManager.SelectedBlockId = _hotbarSlots[4]; }
+        if (window.GetKey(GlfwKey.Number6) == GlfwKeyAction.Press) { _activeHotbarIndex = 5; _constructionManager.SelectedBlockId = _hotbarSlots[5]; }
+        if (window.GetKey(GlfwKey.Number7) == GlfwKeyAction.Press) { _activeHotbarIndex = 6; _constructionManager.SelectedBlockId = _hotbarSlots[6]; }
+
+        // Открытие/Закрытие меню блоков на кнопку B
+        bool bPressed = window.GetKey(GlfwKey.B) == GlfwKeyAction.Press;
+        if (bPressed && !_bWasPressed)
+        {
+            _isBlockMenuOpen = !_isBlockMenuOpen;
+            // Если открыли меню блоков, освобождаем мышь для кликов в ImGui
+            if (_isBlockMenuOpen && _isMouseCaptured)
+            {
+                _isMouseCaptured = false;
+                window.SetInputMode(GlfwInputMode.Cursor, Glfw.Constants.GLFW_CURSOR_NORMAL);
+            }
+        }
+        _bWasPressed = bPressed;
         bool fPressed = window.GetKey(GlfwKey.F) == GlfwKeyAction.Press;
         if (fPressed && !_fWasPressed) _player.ToggleNoclip();
         _fWasPressed = fPressed;
@@ -588,11 +660,11 @@ public sealed class GameplayScene : IScene
 
             if (lmbPressed && !_lmbWasPressed)
             {
-                ExecuteConstructionRaycast(true);
+                _constructionManager.ExecuteConstructionRaycast(_player, true, SpawnCubeLocal);
             }
             if (rmbPressed && !_rmbWasPressed)
             {
-                ExecuteConstructionRaycast(false);
+                _constructionManager.ExecuteConstructionRaycast(_player, false, SpawnCubeLocal);
             }
         }
 

@@ -175,7 +175,7 @@ public sealed unsafe class VulkanRenderer : IRenderer
         _currentCmd = frame.CommandBuffer;
         _currentCmd.Begin(new VkCommandBufferBeginInfo { Flags = VkCommandBufferUsageFlags.OneTimeSubmitBit });
 
-        var colorClear = new VkClearValue { Color = new VkClearColorValue { Float32 = new float4(0.05f, 0.06f, 0.08f, 1f) } };
+        var colorClear = new VkClearValue { Color = new VkClearColorValue { Float32 = new float4(0.53f, 0.81f, 0.92f, 1f) } };
         var depthClear = new VkClearValue { DepthStencil = new VkClearDepthStencilValue { Depth = 1f, Stencil = 0 } };
         Span<VkClearValue> clearValues = [colorClear, depthClear];
 
@@ -197,6 +197,181 @@ public sealed unsafe class VulkanRenderer : IRenderer
         _lastBoundVbo = default;
         _lastBoundDescriptorSet = default;
     }
+    public ImTextureRef BakeBlockIconToTexture(uint blockId, MeshData mesh, string textureName, float4x4 viewProj)
+    {
+        if (mesh == null || mesh.Vertices.Length == 0 || mesh.Indices.Length == 0) return default;
+
+        uint width = 64;
+        uint height = 64;
+        VkFormat vkFormat = VkFormat.R8G8B8A8UNorm;
+
+        // 1. Создаем VkImage для иконки
+        VkImage iconImage = _device.CreateImage(new VkImageCreateInfo
+        {
+            ImageType = VkImageType._2D,
+            Format = vkFormat,
+            Extent = new VkExtent3D { Width = (int)width, Height = (int)height, Depth = 1 },
+            MipLevels = 1,
+            ArrayLayers = 1,
+            Samples = VkSampleCountFlags._1Bit,
+            Tiling = VkImageTiling.Optimal,
+            Usage = VkImageUsageFlags.ColorAttachmentBit | VkImageUsageFlags.SampledBit,
+            SharingMode = VkSharingMode.Exclusive,
+            InitialLayout = VkImageLayout.Undefined
+        }, null);
+
+        var requirements = _device.GetImageMemoryRequirements(iconImage);
+        var memoryType = _physical.FindMemoryType((int)requirements.MemoryTypeBits, VkMemoryPropertyFlags.DeviceLocalBit);
+
+        VkDeviceMemory iconMemory = _device.AllocateMemory(new VkMemoryAllocateInfo
+        {
+            AllocationSize = (ByteSize)requirements.Size,
+            MemoryTypeIndex = memoryType
+        }, null);
+
+        _device.BindImageMemory(iconImage, iconMemory, ByteSize.Zero);
+
+        // 2. Создаем VkImageView
+        VkImageView iconView = _device.CreateImageView(new VkImageViewCreateInfo
+        {
+            Image = iconImage,
+            ViewType = VkImageViewType._2D,
+            Format = vkFormat,
+            SubresourceRange = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = 1 }
+        }, null);
+
+        // 3. Создаем временный RenderPass для запекания
+        var attachment = new VkAttachmentDescription
+        {
+            Format = vkFormat,
+            Samples = VkSampleCountFlags._1Bit,
+            LoadOp = VkAttachmentLoadOp.Clear,
+            StoreOp = VkAttachmentStoreOp.Store,
+            StencilLoadOp = VkAttachmentLoadOp.DontCare,
+            StencilStoreOp = VkAttachmentStoreOp.DontCare,
+            InitialLayout = VkImageLayout.Undefined,
+            FinalLayout = VkImageLayout.ColorAttachmentOptimal
+        };
+
+        var colorReference = new VkAttachmentReference { Attachment = 0, Layout = VkImageLayout.ColorAttachmentOptimal };
+        var subpass = new VkSubpassDescription { PipelineBindPoint = VkPipelineBindPoint.Graphics, ColorAttachmentCount = 1, ColorAttachments = &colorReference };
+
+        var bakeRenderPass = _device.CreateRenderPass(new VkRenderPassCreateInfo
+        {
+            AttachmentCount = 1,
+            Attachments = &attachment,
+            SubpassCount = 1,
+            Subpasses = &subpass
+        }, null);
+
+        var bakeFramebuffer = _device.CreateFramebuffer(new VkFramebufferCreateInfo
+        {
+            RenderPass = bakeRenderPass,
+            AttachmentCount = 1,
+            Attachments = &iconView,
+            Width = (int)width,
+            Height = (int)height,
+            Layers = 1
+        }, null);
+
+        // 4. Выделяем временный CommandBuffer
+        var transientPool = _device.CreateCommandPool(new VkCommandPoolCreateInfo { Flags = VkCommandPoolCreateFlags.TransientBit, QueueFamilyIndex = _queueFamily }, null);
+        var cmd = _device.AllocateCommandBuffer(new VkCommandBufferAllocateInfo { CommandPool = transientPool, Level = VkCommandBufferLevel.Primary });
+
+        cmd.Begin(new VkCommandBufferBeginInfo { Flags = VkCommandBufferUsageFlags.OneTimeSubmitBit });
+
+        var clearValue = new VkClearValue { Color = new VkClearColorValue { Float32 = new float4(0f, 0f, 0f, 0f) } };
+
+        cmd.BeginRenderPass(new VkRenderPassBeginInfo
+        {
+            RenderPass = bakeRenderPass,
+            Framebuffer = bakeFramebuffer,
+            RenderArea = new VkRect2D { Extent = new VkExtent2D { Width = (int)width, Height = (int)height } },
+            ClearValueCount = 1,
+            ClearValues = &clearValue
+        }, VkSubpassContents.Inline);
+
+        // ВАЖНО: Используем стандартный Viewport без фокусов с отрицательной высотой,
+        // так как мы исправим переворот на уровне шейдера/матрицы, что сохранит правильный порядок вершин (Face Culling)
+        cmd.BindPipeline(VkPipelineBindPoint.Graphics, _pipeline);
+        cmd.SetViewport(0, [new VkViewport { Width = (float)width, Height = (float)height, MaxDepth = 1f }]);
+        cmd.SetScissor(0, [new VkRect2D { Extent = new VkExtent2D { Width = (int)width, Height = (int)height } }]);
+
+        if (mesh.VkBuffers is null)
+        {
+            var (vbo, vboMem) = CreateHostVisibleBuffer(mesh.Vertices, VkBufferUsageFlags.VertexBufferBit);
+            var (ibo, iboMem) = CreateHostVisibleBuffer(mesh.Indices, VkBufferUsageFlags.IndexBufferBit);
+            mesh.VkBuffers = (vbo, vboMem, ibo, iboMem);
+        }
+        var buffers = ((VkBuffer Vbo, VkDeviceMemory VboMem, VkBuffer Ibo, VkDeviceMemory IboMem))mesh.VkBuffers;
+
+        cmd.BindVertexBuffer(0, buffers.Vbo);
+        cmd.BindIndexBuffer(buffers.Ibo, ByteSize.Zero, VkIndexType.UInt32);
+
+        if (_vulkanAllocatedTextures.TryGetValue(textureName, out var matAllocated))
+        {
+            cmd.BindDescriptorSets(VkPipelineBindPoint.Graphics, _pipelineLayout, 0, [matAllocated.Set], []);
+        }
+        BlockData block = BlockRegistry.GetById(blockId);
+        float4x4 model = float4x4.Identity;
+        if (block.Shape == BlockShape.Platform)
+        {
+            model = float4x4.CreateScale(1.0f, 0.2f, 1.0f);
+        }
+
+
+        float4x4 flipY = float4x4.CreateScale(1.0f, -1.0f, 1.0f);
+        model = model * flipY;
+
+        // 3. Считаем честную матрицу нормалей для перевернутой модели
+        float4x4.Invert(model, out float4x4 invertedModel);
+        float4x4 normalMatrix = float4x4.Transpose(invertedModel);
+
+        // 4. Вычисляем финальную MVP
+        float4x4 mvp = model * viewProj;
+
+        // 5. ВОЗВРАЩАЕМ СВЕТ: Поскольку модель вывернута наизнанку из-за flipY,
+        // инвертируем нормали БЕЗ изменения MVP. Теперь и текстура на месте, и свет работает корректно.
+        normalMatrix.M11 = -normalMatrix.M11; normalMatrix.M12 = -normalMatrix.M12; normalMatrix.M13 = -normalMatrix.M13;
+        normalMatrix.M21 = -normalMatrix.M21; normalMatrix.M22 = -normalMatrix.M22; normalMatrix.M23 = -normalMatrix.M23;
+        normalMatrix.M31 = -normalMatrix.M31; normalMatrix.M32 = -normalMatrix.M32; normalMatrix.M33 = -normalMatrix.M33;
+
+        // Передаем все три матрицы в push-константы вершинного шейдера Vulkan
+        cmd.PushConstants(_pipelineLayout, VkShaderStageFlags.VertexBit, ByteSize.Zero, mvp);
+        cmd.PushConstants(_pipelineLayout, VkShaderStageFlags.VertexBit, (ByteSize64)64, model);
+        cmd.PushConstants(_pipelineLayout, VkShaderStageFlags.VertexBit, (ByteSize64)128, normalMatrix);
+
+        cmd.DrawIndexed(mesh.Indices.Length, 1, 0, 0, 0);
+
+        cmd.EndRenderPass();
+
+        var barrier = new VkImageMemoryBarrier
+        {
+            OldLayout = VkImageLayout.ColorAttachmentOptimal,
+            NewLayout = VkImageLayout.ShaderReadOnlyOptimal,
+            SrcAccessMask = VkAccessFlags.ColorAttachmentWriteBit,
+            DstAccessMask = VkAccessFlags.ShaderReadBit,
+            Image = iconImage,
+            SubresourceRange = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = 1 }
+        };
+        cmd.PipelineBarrier(VkPipelineStageFlags.ColorAttachmentOutputBit, VkPipelineStageFlags.FragmentShaderBit, VkDependencyFlags.None, [], [], [barrier]);
+        cmd.End();
+
+        var handle = cmd.Handle;
+        VkFence nullFence = default;
+        _queue.Submit([new VkSubmitInfo { CommandBufferCount = 1, CommandBuffers = &handle }], nullFence);
+        _device.WaitIdle();
+
+        _device.DestroyFramebuffer(bakeFramebuffer, null);
+        _device.DestroyRenderPass(bakeRenderPass, null);
+        _device.DestroyCommandPool(transientPool, null);
+
+        var imGuiIconRef = _imGuiVulkanBackend.AddTexture(_textureSampler, iconView, VkImageLayout.ShaderReadOnlyOptimal);
+        _vulkanAllocatedTextures[$"generated_icon_{blockId}"] = (iconView, new VkDescriptorSet((nint)imGuiIconRef._TexID.Value), iconImage, iconMemory);
+
+        return imGuiIconRef;
+    }
+
     public ImTextureRef GetImGuiTexture(string assetName)
     {
         if (_vulkanAllocatedTextures.TryGetValue(assetName, out var allocated))
@@ -302,11 +477,39 @@ public sealed unsafe class VulkanRenderer : IRenderer
 
         _currentFrame = (_currentFrame + 1) % MaxFramesInFlight;
     }
-    public unsafe void InitializeTextureOnDevice(string assetName, ITexture texture)
+    public void InitializeTextureOnDevice(string assetName, ITexture texture)
     {
         var width = (uint)texture.Extent.X;
         var height = (uint)texture.Extent.Y;
         var vkFormat = (VkFormat)(int)texture.Format;
+
+        var rawData = texture.ImageData(0, 0, 0);
+
+        // ВЫЧИСЛЯЕМ РЕАЛЬНОЕ КОЛИЧЕСТВО БАЙТ НА ПИКСЕЛЬ:
+        // Делим общую длину массива на количество пикселей в текстуре
+        int bytesPerPixel = rawData.Length / (int)(width * height);
+
+        // Конвертируем ТОЛЬКО если в файле физически 3 байта на пиксель (RGB)
+        if (bytesPerPixel == 3)
+        {
+            Console.WriteLine($"[Vulkan GPU] Обнаружен чистый RGB ({bytesPerPixel} bpp). Конвертация '{assetName}' в RGBA...");
+
+            byte[] rgbaData = new byte[width * height * 4];
+            for (int i = 0; i < width * height; i++)
+            {
+                rgbaData[i * 4 + 0] = rawData[i * 3 + 0]; // R
+                rgbaData[i * 4 + 1] = rawData[i * 3 + 1]; // G
+                rgbaData[i * 4 + 2] = rawData[i * 3 + 2]; // B
+                rgbaData[i * 4 + 3] = 255;                // A (Непрозрачно)
+            }
+            rawData = rgbaData;
+            vkFormat = VkFormat.R8G8B8A8UNorm; // Переключаем Vulkan на RGBA
+        }
+        else
+        {
+            // Для grass_tile и остальных 4-канальных текстур мы просто берем их родной формат
+            vkFormat = (VkFormat)(int)texture.Format;
+        }
 
         // 1. Создание VkImage
         VkImage image = _device.CreateImage(new VkImageCreateInfo
@@ -322,7 +525,6 @@ public sealed unsafe class VulkanRenderer : IRenderer
             SharingMode = VkSharingMode.Exclusive,
             InitialLayout = VkImageLayout.Undefined
         }, null);
-
         var requirements = _device.GetImageMemoryRequirements(image);
         var memoryType = _physical.FindMemoryType((int)requirements.MemoryTypeBits, VkMemoryPropertyFlags.DeviceLocalBit);
 
@@ -335,7 +537,6 @@ public sealed unsafe class VulkanRenderer : IRenderer
         _device.BindImageMemory(image, memory, ByteSize.Zero);
 
         // 2. Копирование данных через Staging буфер
-        var rawData = texture.ImageData(0, 0, 0);
         var stagingBuffer = _device.CreateBuffer(new VkBufferCreateInfo
         {
             Size = (ByteSize)rawData.Length,
@@ -406,14 +607,9 @@ public sealed unsafe class VulkanRenderer : IRenderer
             SubresourceRange = new VkImageSubresourceRange { AspectMask = VkImageAspectFlags.ColorBit, LevelCount = 1, LayerCount = 1 }
         }, null);
 
-        // === МАГИЯ БОРЬБЫ С КРАШЕМ: Используем проверенный AddTexture из ImGuiBackend ===
-        // Вызываем встроенную регистрацию текстуры. Внутри неё Brutal безопасно создаёт рабочий DescriptorSet.
         var imGuiTexRef = _imGuiVulkanBackend.AddTexture(_textureSampler, view, VkImageLayout.ShaderReadOnlyOptimal);
-
-        // Превращаем полученный нативный хэндл обратно в структуру VkDescriptorSet для рендерера
         VkDescriptorSet texDescriptorSet = new VkDescriptorSet((nint)imGuiTexRef._TexID.Value);
 
-        // Сохраняем ресурсы в словарь для последующего бинда в Draw кадра
         _vulkanAllocatedTextures[assetName] = (view, texDescriptorSet, image, memory);
         Console.WriteLine($"[Vulkan GPU] Текстура '{assetName}' ({width}x{height}) успешно зарегистрирована через ImGui-пул.");
     }
@@ -666,6 +862,7 @@ public sealed unsafe class VulkanRenderer : IRenderer
             RenderFinished = _device.CreateSemaphore(new VkSemaphoreCreateInfo(), null),
         };
     }
+    public void PrepareIconBake(float4x4 viewProjection, float3 cameraPos) { }
 
     private void CreateSwapchain()
     {

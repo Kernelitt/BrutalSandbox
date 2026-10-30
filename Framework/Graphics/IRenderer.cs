@@ -17,6 +17,8 @@ public interface IRenderer : IDisposable
     void UpdateViewProjection(float4x4 viewProjection);
     void BindMaterialTexture(string assetName) { }
     void Draw(float4x4 mvp, Action? postDraw = null) { }
+    void PrepareIconBake(float4x4 viewProjection, float3 cameraPos) { }
 
     ImTextureRef GetImGuiTexture(string assetName);
+    ImTextureRef BakeBlockIconToTexture(uint blockId, MeshData mesh, string textureName, float4x4 viewProj);
 }
