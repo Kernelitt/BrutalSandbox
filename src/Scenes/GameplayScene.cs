@@ -78,6 +78,9 @@ public sealed class GameplayScene : IScene
     // Черные списки для базовой модерации (для сервера)
     private readonly HashSet<string> _bannedNicks = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _bannedIps = new();
+    public bool IsNickBanned(string nickname) => _bannedNicks.Contains(nickname.Trim());
+    public bool IsIpBanned(string ip) => _bannedIps.Contains(ip.Trim());
+
     public GameplayScene(MainApp app, string worldName)
     {
         _app = app;
@@ -777,36 +780,92 @@ public sealed class GameplayScene : IScene
                 return;
             }
 
+            // ИСПРАВЛЕНИЕ: Безопасно собираем весь остаток строки после команды в один целевой аргумент (поддерживает пробелы)
+            string targetParam = "";
+            if (args.Length > 1)
+            {
+                targetParam = string.Join(' ', args, 1, args.Length - 1).Trim();
+            }
+
             switch (command)
             {
                 case "kick":
-                    if (args.Length > 1)
+                    if (!string.IsNullOrEmpty(targetParam))
                     {
-                        string target = args[1];
-                        string kickFmt = string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.ChatServerKicked.ToUtf8()), target);
-                        lock (_chatMessages) _chatMessages.Add(kickFmt);
+                        string targetNick = targetParam;
+                        string targetAddressKey = null;
+
+                        foreach (var kvp in _app.Network.RemotePlayerPositions)
+                        {
+                            if (kvp.Key.Contains('|') && kvp.Key.Split('|')[1].Equals(targetNick, StringComparison.OrdinalIgnoreCase))
+                            {
+                                targetAddressKey = kvp.Key.Split('|')[0];
+                                break;
+                            }
+                        }
+
+                        if (targetAddressKey != null)
+                        {
+                            // ИСПРАВЛЕНИЕ: Отправляем клиенту пакет кика
+                            _app.Network.SendDisconnectionCommand(targetAddressKey, false);
+
+                            string kickFmt = string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.ChatServerKicked.ToUtf8()), targetNick);
+                            AddMessageLocally(kickFmt);
+                        }
+                        else
+                        {
+                            AddMessageLocally($"[Система] Игрок '{targetNick}' не найден на сервере.");
+                        }
                     }
                     break;
 
                 case "ban":
-                    if (args.Length > 1)
+                    if (!string.IsNullOrEmpty(targetParam))
                     {
-                        string target = args[1];
-                        _bannedNicks.Add(target);
-                        string banFmt = string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.ChatServerBannedNick.ToUtf8()), target);
-                        lock (_chatMessages) _chatMessages.Add(banFmt);
+                        string targetNick = targetParam;
+                        _bannedNicks.Add(targetNick);
+
+                        string targetAddressKey = null;
+                        foreach (var kvp in _app.Network.RemotePlayerPositions)
+                        {
+                            if (kvp.Key.Contains('|') && kvp.Key.Split('|')[1].Equals(targetNick, StringComparison.OrdinalIgnoreCase))
+                            {
+                                targetAddressKey = kvp.Key.Split('|')[0];
+                                break;
+                            }
+                        }
+
+                        if (targetAddressKey != null)
+                        {
+                            // ИСПРАВЛЕНИЕ: Отправляем клиенту пакет бана
+                            _app.Network.SendDisconnectionCommand(targetAddressKey, true);
+                        }
+
+                        string banFmt = string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.ChatServerBannedNick.ToUtf8()), targetNick);
+                        AddMessageLocally(banFmt);
                     }
                     break;
 
                 case "banip":
-                    if (args.Length > 1)
+                    if (!string.IsNullOrEmpty(targetParam))
                     {
-                        string targetIp = args[1];
+                        string targetIp = targetParam;
                         _bannedIps.Add(targetIp);
+
+                        // ИСПРАВЛЕНИЕ: Ищем всех игроков с таким IP адресом и отправляем им бан
+                        foreach (var kvp in _app.Network.RemotePlayerPositions)
+                        {
+                            if (kvp.Key.Contains('|') && kvp.Key.StartsWith(targetIp))
+                            {
+                                _app.Network.SendDisconnectionCommand(targetIp, true);
+                            }
+                        }
+
                         string banIpFmt = string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.ChatServerBannedIp.ToUtf8()), targetIp);
-                        lock (_chatMessages) _chatMessages.Add(banIpFmt);
+                        AddMessageLocally(banIpFmt);
                     }
                     break;
+
 
                 case "close":
                     lock (_chatMessages) _chatMessages.Add(System.Text.Encoding.UTF8.GetString(LocalizationKeys.ChatServerClosing.ToUtf8()));
@@ -826,7 +885,10 @@ public sealed class GameplayScene : IScene
             string formatted = $"[{_app.Network.MyNickname}]: {message}";
             lock (_chatMessages) _chatMessages.Add(formatted);
 
-            // В сетевой игре здесь вызывается отправка пакета типа GameMessageID.ChatMessage всем клиентам
+            if (_app.Network.IsActive)
+            {
+                _app.Network.SendChatMessage(formatted);
+            }
         }
     }
 

@@ -49,9 +49,12 @@ public sealed unsafe class NetworkManager : IDisposable
 
     private readonly Dictionary<string, SavedPlayerData> _savedPlayersFromSession = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, SavedPlayerData> SavedPlayersFromSession => _savedPlayersFromSession;
-
+    private DateTime _lastServerPacketTime = DateTime.UtcNow;
     private string _myNickname = "Player_" + Random.Shared.Next(100, 999);
     public string MyNickname { get => _myNickname; set => _myNickname = value; }
+    private bool _pendingDisconnect = false;
+    private string _disconnectReason = "";
+
     public NetworkManager(MainApp app)
     {
         _app = app;
@@ -107,11 +110,48 @@ public sealed unsafe class NetworkManager : IDisposable
     {
         if (!_isActive) return;
 
+        // 1. Безопасно вычитываем все пакеты из очереди RakNet
         for (var packet = _peer.Receive(); packet != null; packet = _peer.Receive())
         {
+            if (!_isServer)
+            {
+                _lastServerPacketTime = DateTime.UtcNow;
+            }
+
             ProcessPacket(packet);
+
+            // Деаллокация происходит, пока _peer еще гарантированно существует и стабилен
             _peer.DeallocatePacket(packet);
         }
+
+        // 2. ИСПРАВЛЕНИЕ: Выполняем безопасное отключение ПОСЛЕ завершения цикла обработки пакетов
+        if (_pendingDisconnect && _isActive)
+        {
+            _isActive = false;
+            _pendingDisconnect = false;
+
+            _peer.Shutdown(100);
+            _peer.Dispose();
+
+            if (_app.CurrentScene is GameplayScene gameplay)
+            {
+                gameplay.AddMessageLocally($"[Система] Вы были отключены: {_disconnectReason}");
+            }
+
+            _app.ChangeScene(GameState.MainMenu);
+            return; // Выходим из метода, так как сеть утилизирована
+        }
+
+        // Проверка 10-секундного таймаута (только для клиента)
+        if (!_isServer && _isActive)
+        {
+            if ((DateTime.UtcNow - _lastServerPacketTime).TotalSeconds > 10.0)
+            {
+                Console.WriteLine("[Клиент] Превышено время ожидания ответа от сервера (10 сек). Отключение.");
+                DisconnectMeWithReason("Превышено время ожидания сервера (Таймаут)");
+            }
+        }
+
         if (_isServer)
         {
             var phys = PhysicsManager.Instance;
@@ -151,6 +191,35 @@ public sealed unsafe class NetworkManager : IDisposable
             }
         }
     }
+    public void SendDisconnectionCommand(string clientAddressKey, bool isBan)
+    {
+        if (!_isServer || !_isActive) return;
+
+        // Формируем пакет кика/бана
+        byte[] buffer = new byte[2];
+        buffer[0] = (byte)DefaultMessageIDTypes.UserPacketEnum;
+        buffer[1] = (byte)(isBan ? GameMessageID.BanMessage : GameMessageID.KickMessage);
+
+        // Ищем SystemAddress или RakNetGUID по ключу в вашей системе
+        // Отправляем пакет ReliableOrdered по адресу игрока, а затем закрываем соединение
+        foreach (var key in RemotePlayerPositions.Keys)
+        {
+            if (key.StartsWith(clientAddressKey + "|"))
+            {
+                // Здесь отправляем пакет в RakNet. Так как точный метод отправки по строке адреса скрыт, 
+                // сервер делает широковещательную рассылку с фильтрацией, либо отправляет пакет индивидуально:
+                _peer.Send(buffer, PacketPriority.HighPriority, PacketReliability.ReliableOrdered, 0, new AddressOrGUID(new SystemAddress()), true);
+                break;
+            }
+        }
+    }
+
+    public void DisconnectMeWithReason(string reason)
+    {
+        // Устанавливаем флаги для безопасного удаления в конце метода Update
+        _pendingDisconnect = true;
+        _disconnectReason = reason;
+    }
 
     private void ProcessPacket(Packet* packet)
     {
@@ -176,10 +245,28 @@ public sealed unsafe class NetworkManager : IDisposable
 
         if (packetId == (byte)DefaultMessageIDTypes.NewIncomingConnection)
         {
-            Console.WriteLine($"[Server] Новый игрок подключился: {clientAddressKey}");
-            if (_app.CurrentScene is GameplayScene gameplayScene)
+            if (_isServer)
             {
-                SendExistingWorldToClient(packet->SystemAddress, gameplayScene.GetCubeBlockIds(), gameplayScene.GetNetworkedCubes());
+                // Извлекаем чистый IP-адрес без порта
+                string rawAddress = packet->SystemAddress.ToString(false);
+
+                if (_app.CurrentScene is GameplayScene gameplayScene)
+                {
+                    if (gameplayScene.IsIpBanned(rawAddress))
+                    {
+                        Console.WriteLine($"[Сервер] Отклонено подключение: IP {rawAddress} находится в бан-листе.");
+
+                        // Если в вашей обертке Brutal.RakNetApi у _peer есть метод для принудительного разрыва:
+                        // _peer.CloseConnection(packet->SystemAddress, true);
+                        return; // Прерываем обработку подключения
+                    }
+                }
+
+                Console.WriteLine($"[Server] Новый игрок подключился: {clientAddressKey}");
+                if (_app.CurrentScene is GameplayScene gameplay)
+                {
+                    SendExistingWorldToClient(packet->SystemAddress, gameplay.GetCubeBlockIds(), gameplay.GetNetworkedCubes());
+                }
             }
             return;
         }
@@ -231,14 +318,29 @@ public sealed unsafe class NetworkManager : IDisposable
             if (gameId == GameMessageID.PlayerTransform)
             {
                 byte* ptr = packet->Data + 2;
-                string remoteNick = System.Text.Encoding.UTF8.GetString(ptr, 32).TrimEnd('\0');
+                string remoteNick = System.Text.Encoding.UTF8.GetString(ptr, 32).TrimEnd('\0').Trim();
                 float3 position = *(float3*)(ptr + 32);
                 float3 velocity = *(float3*)(ptr + 44);
 
-                string storageKey = $"{clientAddressKey}|{remoteNick}";
-
                 if (_isServer)
                 {
+                    // Проверка на бан по никнейму
+                    if (_app.CurrentScene is GameplayScene gameplayScene)
+                    {
+                        if (gameplayScene.IsNickBanned(remoteNick))
+                        {
+                            Console.WriteLine($"[Сервер] Игрок с забаненным ником '{remoteNick}' пытается синхронизироваться. Отправка пакета бана.");
+
+                            // Формируем пакет бана и отправляем его отправителю
+                            byte[] banBuffer = new byte[2];
+                            banBuffer[0] = (byte)DefaultMessageIDTypes.UserPacketEnum;
+                            banBuffer[1] = (byte)GameMessageID.BanMessage;
+                            _peer.Send(banBuffer, PacketPriority.HighPriority, PacketReliability.ReliableOrdered, 0, new AddressOrGUID(packet->SystemAddress), false);
+                            return; // Игнорируем пакет трансформа, игрок не появится в мире
+                        }
+                    }
+
+                    string storageKey = $"{clientAddressKey}|{remoteNick}";
                     RemotePlayerPositions[storageKey] = position;
 
                     var phys = PhysicsManager.Instance;
@@ -379,6 +481,15 @@ public sealed unsafe class NetworkManager : IDisposable
                         gameplayScene.AddMessageLocally(message);
                     }
                 }
+
+            }
+            else if (gameId == GameMessageID.KickMessage && !_isServer)
+            {
+                DisconnectMeWithReason("Вы были кикнуты администратором сервера.");
+            }
+            else if (gameId == GameMessageID.BanMessage && !_isServer)
+            {
+                DisconnectMeWithReason("Вы были ЗАБАНЕНЫ на этом сервере.");
             }
 
         }

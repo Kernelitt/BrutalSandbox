@@ -8,5 +8,7 @@ public enum GameMessageID : byte
     SyncDynamicObjects = 4,
     BuildObject = 5,     
     DestroyObject = 6,
-    ChatMessage = 7
+    ChatMessage = 7,
+    KickMessage = 8,
+    BanMessage = 9
 }
