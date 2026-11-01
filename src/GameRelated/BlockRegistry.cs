@@ -108,6 +108,28 @@ public static class BlockRegistry
             DefaultFriction = 0.6f,
             IsStatic = false
         });
+
+        Register(new BlockData
+        {
+            Id = 8,
+            Name = "Ice Block",
+            TextureName = "ice_tile",
+            Shape = BlockShape.Cube,
+            DefaultMass = 5.0f,
+            DefaultFriction = 0.02f,
+            IsStatic = false
+        });
+
+        Register(new BlockData
+        {
+            Id = 9,
+            Name = "Ice Platform",
+            TextureName = "ice_tile",
+            Shape = BlockShape.Platform,
+            DefaultMass = 9.0f,
+            DefaultFriction = 0.04f,
+            IsStatic = false
+        });
     }
 
     private static void Register(BlockData block)

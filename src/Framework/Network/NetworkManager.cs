@@ -2,10 +2,12 @@
 using Brutal.Numerics;
 using Brutal.RakNetApi;
 using Brutal.Strings;
+using BrutalSandbox.Framework.Files;
+using BrutalSandbox.Framework.Physics;
+using BrutalSandbox.Framework.Scenes;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using BrutalSandbox.Framework.Physics;
 
 namespace BrutalSandbox.Framework.Network;
 
@@ -25,6 +27,9 @@ public sealed unsafe class NetworkManager : IDisposable
     private SystemAddress _serverAddress;
     private readonly MainApp _app;
     public ConcurrentDictionary<string, float3> RemotePlayerPositions { get; } = new();
+    public ConcurrentDictionary<string, float3> RemotePlayerVelocities { get; } = new();
+
+
     public ConcurrentDictionary<uint, NetworkCubeState> NetworkedCubesState { get; } = new();
     public struct BuildCommand
     {
@@ -41,6 +46,12 @@ public sealed unsafe class NetworkManager : IDisposable
 
     public bool IsServer => _isServer;
     public bool IsActive => _isActive;
+
+    private readonly Dictionary<string, SavedPlayerData> _savedPlayersFromSession = new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, SavedPlayerData> SavedPlayersFromSession => _savedPlayersFromSession;
+
+    private string _myNickname = "Player_" + Random.Shared.Next(100, 999);
+    public string MyNickname { get => _myNickname; set => _myNickname = value; }
     public NetworkManager(MainApp app)
     {
         _app = app;
@@ -91,6 +102,7 @@ public sealed unsafe class NetworkManager : IDisposable
         _isActive = true;
     }
 
+
     public void Update()
     {
         if (!_isActive) return;
@@ -100,6 +112,44 @@ public sealed unsafe class NetworkManager : IDisposable
             ProcessPacket(packet);
             _peer.DeallocatePacket(packet);
         }
+        if (_isServer)
+        {
+            var phys = PhysicsManager.Instance;
+            foreach (var kvp in _remotePhysicsBodies)
+            {
+                string clientKey = kvp.Key;
+                uint bodyId = kvp.Value;
+
+                // Извлекаем целевую позицию, которую прислал клиент
+                string targetFullKey = null;
+                foreach (var rKey in RemotePlayerPositions.Keys)
+                {
+                    if (rKey.StartsWith(clientKey + "|")) { targetFullKey = rKey; break; }
+                }
+
+                if (targetFullKey != null)
+                {
+                    float3 clientTargetPos = RemotePlayerPositions[targetFullKey];
+                    phys.BodyInterface.GetPositionAndRotation(bodyId, out float3 currentServerPos, out _);
+
+                    float3 toTarget = clientTargetPos - currentServerPos;
+                    float distSq = float3.Dot(toTarget, toTarget);
+
+                    if (distSq > 25f) // Перебор по дистанции — жесткая телепортация
+                    {
+                        phys.BodyInterface.SetPositionAndRotation(bodyId, clientTargetPos, floatQuat.Identity, Activation.Activate);
+                        phys.BodyInterface.SetLinearVelocity(bodyId, float3.Zero);
+                    }
+                    else
+                    {
+                        // Вместо SetPosition рассчитываем честную физическую скорость движения к цели!
+                        // Физическое тело будет толкать кубы перед собой, коллизии работают идеально.
+                        float3 pushVelocity = toTarget * 12.0f;
+                        phys.BodyInterface.SetLinearVelocity(bodyId, pushVelocity);
+                    }
+                }
+            }
+        }
     }
 
     private void ProcessPacket(Packet* packet)
@@ -108,21 +158,25 @@ public sealed unsafe class NetworkManager : IDisposable
 
         byte packetId = packet->Data[0];
         string clientAddressKey = packet->SystemAddress.ToString();
-
-        // Системные пакеты RakNet
-        if (packetId == (byte)DefaultMessageIDTypes.ConnectionRequestAccepted)
+        if (!_isServer && packetId == (byte)DefaultMessageIDTypes.ConnectionRequestAccepted)
         {
+            // Запоминаем авторитетный адрес сервера, полученный напрямую из пакета!
             _serverAddress = packet->SystemAddress;
-            Console.WriteLine("[Client] Успешное подключение к серверу!");
+            Console.WriteLine($"[Клиент] Подключение принято сервером: {_serverAddress.ToString(true)}");
+            return;
+        }
+        // Клиент получает уведомление, что сервер закрылся или соединение потеряно
+        if (!_isServer && (packetId == (byte)DefaultMessageIDTypes.ConnectionLost || packetId == (byte)DefaultMessageIDTypes.DisconnectionNotification))
+        {
+            Console.WriteLine("[Client] Соединение с сервером потеряно. Возврат в главное меню.");
+            _isActive = false;
+            _app.ChangeScene(GameState.MainMenu); // Автоматический кик обратно в меню
             return;
         }
 
-        // СВЯЗЫВАНИЕ: Момент авторизации нового игрока на СЕРВЕРЕ
         if (packetId == (byte)DefaultMessageIDTypes.NewIncomingConnection)
         {
-            Console.WriteLine($"[Server] Новый игрок авторизован и вошел в мир: {clientAddressKey}");
-
-            // Запрашиваем у сцены текущее состояние мира и отправляем его новому клиенту
+            Console.WriteLine($"[Server] Новый игрок подключился: {clientAddressKey}");
             if (_app.CurrentScene is GameplayScene gameplayScene)
             {
                 SendExistingWorldToClient(packet->SystemAddress, gameplayScene.GetCubeBlockIds(), gameplayScene.GetNetworkedCubes());
@@ -132,13 +186,40 @@ public sealed unsafe class NetworkManager : IDisposable
 
         if (packetId == (byte)DefaultMessageIDTypes.ConnectionLost || packetId == (byte)DefaultMessageIDTypes.DisconnectionNotification)
         {
-            Console.WriteLine($"[Network] Игрок отключился: {clientAddressKey}");
-            RemotePlayerPositions.TryRemove(clientAddressKey, out _);
-
-            if (_isServer && _remotePhysicsBodies.TryRemove(clientAddressKey, out uint bodyId))
+            if (_isServer)
             {
-                PhysicsManager.Instance.BodyInterface.RemoveBody(bodyId);
-                PhysicsManager.Instance.BodyInterface.DestroyBody(bodyId);
+                Console.WriteLine($"[Server] Игрок {clientAddressKey} покинул сервер. Сохраняем состояние.");
+
+                // Если у нас был зафиксирован никнейм для этого адреса, вытаскиваем его трансформ
+                if (_remotePhysicsBodies.TryRemove(clientAddressKey, out uint bodyId))
+                {
+                    var phys = PhysicsManager.Instance;
+                    phys.BodyInterface.GetPositionAndRotation(bodyId, out float3 lastPos, out _);
+                    float3 lastVel = phys.BodyInterface.GetLinearVelocity(bodyId);
+
+                    // Ищем имя игрока, соответствующее этому адресу
+                    string associatedNick = "UnknownPlayer";
+                    foreach (var kvp in RemotePlayerPositions)
+                    {
+                        if (kvp.Key.StartsWith(clientAddressKey + "|"))
+                        {
+                            associatedNick = kvp.Key.Split('|')[1];
+                            RemotePlayerPositions.TryRemove(kvp.Key, out _);
+                            break;
+                        }
+                    }
+
+                    // Запоминаем данные вышедшего игрока
+                    _savedPlayersFromSession[associatedNick] = new SavedPlayerData
+                    {
+                        Nickname = associatedNick,
+                        Position = lastPos,
+                        LinearVelocity = lastVel
+                    };
+
+                    phys.BodyInterface.RemoveBody(bodyId);
+                    phys.BodyInterface.DestroyBody(bodyId);
+                }
             }
             return;
         }
@@ -149,61 +230,43 @@ public sealed unsafe class NetworkManager : IDisposable
 
             if (gameId == GameMessageID.PlayerTransform)
             {
+                byte* ptr = packet->Data + 2;
+                string remoteNick = System.Text.Encoding.UTF8.GetString(ptr, 32).TrimEnd('\0');
+                float3 position = *(float3*)(ptr + 32);
+                float3 velocity = *(float3*)(ptr + 44);
+
+                string storageKey = $"{clientAddressKey}|{remoteNick}";
+
                 if (_isServer)
                 {
-                    float3 position = *(float3*)(packet->Data + 2);
-                    RemotePlayerPositions[clientAddressKey] = position;
+                    RemotePlayerPositions[storageKey] = position;
 
                     var phys = PhysicsManager.Instance;
                     if (!_remotePhysicsBodies.TryGetValue(clientAddressKey, out uint bodyId))
                     {
-                        using (var capsuleSettings = CapsuleShapeSettings.Create(0.5f, 0.4f, default))
-                        {
-                            bodyId = phys.CreateBody(capsuleSettings, position, floatQuat.Identity, MotionType.Dynamic, PhysicsManager.LayerMoving, "stone_wall");
-                        }
+                        using var capsuleSettings = CapsuleShapeSettings.Create(0.5f, 0.4f, default);
+                        bodyId = phys.CreateBody(capsuleSettings, position, floatQuat.Identity, MotionType.Dynamic, PhysicsManager.LayerMoving, "stone_wall");
                         phys.BodyInterface.SetGravityFactor(bodyId, 0f);
                         _remotePhysicsBodies[clientAddressKey] = bodyId;
                     }
-                    else
-                    {
-                        phys.BodyInterface.GetPositionAndRotation(bodyId, out float3 currentServerPos, out _);
-                        float3 toTarget = position - currentServerPos;
-                        float distSq = float3.Dot(toTarget, toTarget);
 
-                        if (distSq > 16f)
-                        {
-                            phys.BodyInterface.SetPositionAndRotation(bodyId, position, floatQuat.Identity, Activation.Activate);
-                            phys.BodyInterface.SetLinearVelocity(bodyId, float3.Zero);
-                        }
-                        else
-                        {
-                            float3 requiredVelocity = toTarget * 10f;
-                            float maxPushSpeed = 12f;
-                            float speedSq = float3.Dot(requiredVelocity, requiredVelocity);
-                            if (speedSq > maxPushSpeed * maxPushSpeed)
-                            {
-                                requiredVelocity = float3.Normalize(requiredVelocity) * maxPushSpeed;
-                            }
-                            phys.BodyInterface.SetLinearVelocity(bodyId, requiredVelocity);
-                        }
-                    }
+                    // Плавная коррекция позиции и применение скоростей на стороне сервера
+                    phys.BodyInterface.SetLinearVelocity(bodyId, velocity);
+                    phys.BodyInterface.SetPositionAndRotation(bodyId, position, floatQuat.Identity, Activation.Activate);
 
-                    BroadcastTransform(clientAddressKey, position, packet->Guid);
+                    // Пересылаем всем остальным клиентам
+                    BroadcastTransform(remoteNick, position, velocity, packet->Guid);
                 }
                 else
                 {
-                    byte* ptr = packet->Data + 2;
-                    string remoteAddressStr = System.Text.Encoding.UTF8.GetString(ptr, 64).TrimEnd('\0');
-                    float3 remotePos = *(float3*)(packet->Data + 66);
-
-                    RemotePlayerPositions[remoteAddressStr] = remotePos;
+                    // Клиент сохраняет позицию и скорость удаленного игрока
+                    RemotePlayerPositions[remoteNick] = position;
+                    RemotePlayerVelocities[remoteNick] = velocity;
                 }
             }
             else if (gameId == GameMessageID.BuildObject)
             {
-                // Принудительно кастим к byte* для побайтовой точности
                 byte* dataPtr = (byte*)packet->Data;
-
                 uint netId = *(uint*)(dataPtr + 2);
 
                 float3 pos;
@@ -217,22 +280,23 @@ public sealed unsafe class NetworkManager : IDisposable
 
                 if (_isServer)
                 {
-                    Console.WriteLine($"[СЕРВЕР] Запрос от клиента. Врем. ID: {netId}, Истинный BlockID: {blockId}, Static: {isStatic}");
+                    Console.WriteLine($"[СЕРВЕР] Получен запрос на блок от клиента. Старый ID: {netId}, BlockID: {blockId}");
 
                     if (_app.CurrentScene is GameplayScene gameplayScene)
                     {
+                        // Генерируем авторитетный серверный ID вместо временного клиентского
                         netId = gameplayScene.GenerateNextNetworkId(blockId);
                     }
 
-                    // Сервер пересылает пакет дальше с сохранением оригинальных blockId и isStatic
+                    // Пересылаем пакет всем остальным клиентам, исключая того, кто его прислал (packet->Guid)
                     SendBuildOrDestroyToAll(netId, pos, true, default, blockId, parentNetId, isStatic);
                 }
                 else
                 {
-                    Console.WriteLine($"[КЛИЕНТ] Получен авторитетный блок от сервера. ID: {netId}, Распакованный BlockID: {blockId}, Static: {isStatic}");
+                    Console.WriteLine($"[КЛИЕНТ] Получен авторитетный блок от сервера. ID: {netId}, BlockID: {blockId}");
                 }
 
-                // Отправляем в нашу новую безопасную структуру очереди
+                // ИСПРАВЛЕНИЕ: Добавляем команду в очередь симуляции (выполняется и на сервере, и на клиенте!)
                 IncomingBuildCommands.Enqueue(new BuildCommand
                 {
                     NetId = netId,
@@ -242,7 +306,28 @@ public sealed unsafe class NetworkManager : IDisposable
                     ParentNetId = parentNetId
                 });
             }
+            else if (gameId == GameMessageID.DestroyObject)
+            {
+                uint netId = *(uint*)(packet->Data + 2);
 
+                // Очищаем сетевое состояние объекта из кэша
+                NetworkedCubesState.TryRemove(netId, out _);
+
+                if (_isServer)
+                {
+                    Console.WriteLine($"[СЕРВЕР] Получен запрос на удаление от клиента. ID: {netId}");
+
+                    // Сервер уведомляет остальных, исключая автора запроса
+                    SendBuildOrDestroyToAll(netId, float3.Zero, false, default);
+                }
+                else
+                {
+                    Console.WriteLine($"[КЛИЕНТ] Получена команда на удаление от сервера. ID: {netId}");
+                }
+
+                // ИСПРАВЛЕНИЕ: Добавляем команду удаления в очередь симуляции для всех сторон!
+                IncomingDestroyCommands.Enqueue(netId);
+            }
             else if (gameId == GameMessageID.SyncDynamicObjects && !_isServer)
             {
                 int count = *(int*)(packet->Data + 2);
@@ -259,32 +344,6 @@ public sealed unsafe class NetworkManager : IDisposable
                     offset += 56;
                 }
             }
-            else if (gameId == GameMessageID.DestroyObject)
-            {
-                uint netId = *(uint*)(packet->Data + 2);
-
-                if (_isServer)
-                {
-                    Console.WriteLine($"[ОТЛАДКА УДАЛЕНИЯ СЕРВЕРА] Получен запрос на удаление. ID: {netId}");
-
-                    // ИСПРАВЛЕНИЕ: Сервер очищает сетевой кэш состояния этого куба у себя
-                    NetworkedCubesState.TryRemove(netId, out _);
-
-                    IncomingDestroyCommands.Enqueue(netId);
-                    SendBuildOrDestroyToAll(netId, float3.Zero, false, default);
-                }
-                else
-                {
-                    Console.WriteLine($"[ОТЛАДКА УДАЛЕНИЯ КЛИЕНТА] Получена команда на удаление от сервера. ID: {netId}");
-
-                    // ИСПРАВЛЕНИЕ: Клиент очищает сетевой кэш состояния этого куба у себя
-                    NetworkedCubesState.TryRemove(netId, out _);
-
-                    IncomingDestroyCommands.Enqueue(netId);
-                }
-            }
-
-
         }
     }
  
@@ -323,49 +382,44 @@ public sealed unsafe class NetworkManager : IDisposable
         }
     }
 
-    public void SendMyTransform(float3 position)
+    public void SendMyTransform(float3 position, float3 velocity)
     {
         if (!_isActive) return;
 
-        if (_isServer)
-        {
-            byte[] buffer = new byte[2 + 64 + 12];
-            buffer[0] = (byte)DefaultMessageIDTypes.UserPacketEnum;
-            buffer[1] = (byte)GameMessageID.PlayerTransform;
-
-            fixed (byte* p = buffer)
-            {
-                System.Text.Encoding.UTF8.GetBytes("SERVER\0").CopyTo(new Span<byte>(p + 2, 64));
-                *(float3*)(p + 66) = position;
-            }
-
-            _peer.Send(buffer, PacketPriority.HighPriority, PacketReliability.UnreliableSequenced, 0, new AddressOrGUID(new SystemAddress()), true);
-        }
-        else
-        {
-            byte[] buffer = new byte[2 + 12];
-            buffer[0] = (byte)DefaultMessageIDTypes.UserPacketEnum;
-            buffer[1] = (byte)GameMessageID.PlayerTransform;
-
-            fixed (byte* p = buffer)
-            {
-                *(float3*)(p + 2) = position;
-            }
-
-            _peer.Send(buffer, PacketPriority.HighPriority, PacketReliability.UnreliableSequenced, 0, new AddressOrGUID(_serverAddress), false);
-        }
-    }
-
-    private void BroadcastTransform(string originAddress, float3 position, RakNetGUID excludeGuid)
-    {
-        byte[] buffer = new byte[2 + 64 + 12];
+        byte[] buffer = new byte[58];
         buffer[0] = (byte)DefaultMessageIDTypes.UserPacketEnum;
         buffer[1] = (byte)GameMessageID.PlayerTransform;
 
         fixed (byte* p = buffer)
         {
-            System.Text.Encoding.UTF8.GetBytes(originAddress + "\0").CopyTo(new Span<byte>(p + 2, 64));
-            *(float3*)(p + 66) = position;
+            byte[] nickBytes = System.Text.Encoding.UTF8.GetBytes(_myNickname.PadRight(32, '\0'));
+            Array.Copy(nickBytes, 0, buffer, 2, 32);
+            *(float3*)(p + 34) = position;
+            *(float3*)(p + 46) = velocity;
+        }
+
+        if (_isServer)
+        {
+            _peer.Send(buffer, PacketPriority.HighPriority, PacketReliability.UnreliableSequenced, 0, new AddressOrGUID(new SystemAddress()), true);
+        }
+        else
+        {
+            _peer.Send(buffer, PacketPriority.HighPriority, PacketReliability.UnreliableSequenced, 0, new AddressOrGUID(_serverAddress), false);
+        }
+    }
+
+    private void BroadcastTransform(string nickname, float3 position, float3 velocity, RakNetGUID excludeGuid)
+    {
+        byte[] buffer = new byte[58];
+        buffer[0] = (byte)DefaultMessageIDTypes.UserPacketEnum;
+        buffer[1] = (byte)GameMessageID.PlayerTransform;
+
+        fixed (byte* p = buffer)
+        {
+            byte[] nickBytes = System.Text.Encoding.UTF8.GetBytes(nickname.PadRight(32, '\0'));
+            Array.Copy(nickBytes, 0, buffer, 2, 32);
+            *(float3*)(p + 34) = position;
+            *(float3*)(p + 46) = velocity;
         }
 
         _peer.Send(buffer, PacketPriority.HighPriority, PacketReliability.UnreliableSequenced, 0, new AddressOrGUID(excludeGuid), true);

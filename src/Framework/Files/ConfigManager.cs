@@ -1,6 +1,7 @@
 ﻿using System.IO;
 using BrutalSandbox.Framework.Audio;
 using BrutalSandbox.Framework.Localization;
+using BrutalSandbox.Framework.Network; // Добавить для доступа к NetworkManager
 
 namespace BrutalSandbox.Framework.Files;
 
@@ -8,11 +9,11 @@ public static class ConfigManager
 {
     private static readonly string ConfigPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.cfg");
 
-    public static void Load(LocalizationManager loc, AudioManager audio)
+    public static void Load(LocalizationManager loc, AudioManager audio, NetworkManager network)
     {
         if (!File.Exists(ConfigPath))
         {
-            Save(loc, audio); // Создаем дефолтный конфиг, если файла нет
+            Save(loc, audio, network);
             return;
         }
 
@@ -34,6 +35,9 @@ public static class ConfigManager
                     case "Language":
                         loc.SetLanguage(value);
                         break;
+                    case "Player.Nickname":
+                        if (!string.IsNullOrEmpty(value)) network.MyNickname = value;
+                        break;
                     case "Volume.Master":
                         if (float.TryParse(value, out float m)) audio.MasterVolume = m;
                         break;
@@ -54,13 +58,14 @@ public static class ConfigManager
         }
     }
 
-    public static void Save(LocalizationManager loc, AudioManager audio)
+    public static void Save(LocalizationManager loc, AudioManager audio, NetworkManager network)
     {
         try
         {
             using var sw = new StreamWriter(ConfigPath, false);
             sw.WriteLine("# Игровые настройки TestSandbox");
             sw.WriteLine($"Language={loc.CurrentLanguage}");
+            sw.WriteLine($"Player.Nickname={network.MyNickname}");
             sw.WriteLine($"Volume.Master={audio.MasterVolume:F2}");
             sw.WriteLine($"Volume.Music={audio.MusicVolume:F2}");
             sw.WriteLine($"Volume.SFX={audio.SfxVolume:F2}");

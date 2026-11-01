@@ -7,7 +7,7 @@ if (!Glfw.Init())
 
 // Prefer Vulkan wherever the platform provides a loader/driver (including macOS via a
 // translation layer such as MoltenVK). Only fall back to OpenGL where it does not.
-var useOpenGl = Glfw.VulkanSupported();
+var useOpenGl = !Glfw.VulkanSupported();
 
 if (useOpenGl)
 {

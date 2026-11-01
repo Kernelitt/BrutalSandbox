@@ -26,23 +26,136 @@ public sealed class MainMenuScene : IScene
     public void Update(float deltaTime) { }
     public void Render(IRenderer renderer, float4x4 viewProj) { }
 
+
+    private byte[] _worldNameBuffer = System.Text.Encoding.UTF8.GetBytes("New World" + new string('\0', 20));
+    private byte[] _nickBuffer = System.Text.Encoding.UTF8.GetBytes("Player_" + Random.Shared.Next(100, 999) + new string('\0', 20));
+    private byte[] _renameWorldBuffer = new byte[20];
+    private bool _showRenamePopup = false;
+
+    private int _selectedWorldIndex = -1;
+
     public void RenderUi()
     {
-        ImGui.SetNextWindowPos(new float2(450, 150), ImGuiCond.FirstUseEver);
-        ImGui.SetNextWindowSize(new float2(500, 480), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowPos(new float2(450, 100), ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(new float2(550, 550), ImGuiCond.FirstUseEver);
 
-        // Локализованный заголовок окна
         if (ImGui.Begin(LocalizationKeys.MenuTitle.ToUtf8()))
         {
             if (ImGui.BeginTabBar("MenuTabs"u8))
             {
-                // Вкладка 1: Игра и Настройки
-                if (ImGui.BeginTabItem(LocalizationKeys.MenuTitle.ToUtf8()))
+                // Вкладка 1: Миры и Одиночная игра
+                if (ImGui.BeginTabItem("Выбор мира"u8))
                 {
                     ImGui.Spacing();
-                    if (ImGui.Button(LocalizationKeys.MenuStartGame.ToUtf8(), new float2(-1, 40)))
+                    ImGui.Text("Создать новый мир:"u8);
+                    ImGui.InputText("Имя мира##new"u8, _worldNameBuffer);
+
+                    string newWorldName = System.Text.Encoding.UTF8.GetString(_worldNameBuffer).Split('\0')[0].Trim();
+
+                    if (ImGui.Button("Запустить новый мир", new float2(-1, 35)))
                     {
-                        _app.ChangeScene(GameState.Gameplay);
+                        if (!string.IsNullOrEmpty(newWorldName))
+                        {
+                            _app.ChangeScene(GameState.Gameplay, newWorldName);
+                        }
+                    }
+
+                    ImGui.Separator();
+                    ImGui.Text("Доступные сохранения:"u8);
+
+                    var worlds = WorldSerializer.GetAvailableWorlds();
+
+                    // Список сохраненных миров во фрейме
+                    if (ImGui.BeginChild("WorldsList"u8, new float2(-1, 150), ImGuiChildFlags.Borders))
+                    {
+                        if (worlds.Count == 0)
+                        {
+                            ImGui.Text("Нет сохраненных миров."u8);
+                        }
+                        else
+                        {
+                            for (int i = 0; i < worlds.Count; i++)
+                            {
+                                if (ImGui.Selectable($"{worlds[i]}##world_{i}", _selectedWorldIndex == i))
+                                {
+                                    _selectedWorldIndex = i;
+                                    // Копируем имя выбранного мира в буфер
+                                    byte[] nameBytes = System.Text.Encoding.UTF8.GetBytes(worlds[i] + new string('\0', 20));
+                                    Array.Copy(nameBytes, _worldNameBuffer, Math.Min(nameBytes.Length, _worldNameBuffer.Length));
+                                }
+                            }
+                        }
+                    }
+                    ImGui.EndChild();
+
+                    if (_selectedWorldIndex >= 0 && _selectedWorldIndex < worlds.Count)
+                    {
+                        string targetWorld = worlds[_selectedWorldIndex];
+
+                        if (ImGui.Button($"Загрузить мир: {targetWorld}", new float2(-1, 35)))
+                        {
+                            _app.ChangeScene(GameState.Gameplay, targetWorld);
+                        }
+
+                        ImGui.Spacing();
+
+                        if (ImGui.Button("Переименовать мир"u8, new float2(260, 30)))
+                        {
+                            _showRenamePopup = true;
+                            byte[] currentNameBytes = System.Text.Encoding.UTF8.GetBytes(targetWorld + new string('\0', 20));
+                            Array.Copy(currentNameBytes, _renameWorldBuffer, Math.Min(currentNameBytes.Length, _renameWorldBuffer.Length));
+                        }
+                        ImGui.SameLine();
+                        if (ImGui.Button("Удалить мир"u8, new float2(260, 30)))
+                        {
+                            WorldSerializer.DeleteWorld(targetWorld); // Убедитесь, что в вашем сериализаторе реализовано физическое удаление файлов мира
+                            _selectedWorldIndex = -1;
+                        }
+                    }
+
+                    if (_showRenamePopup)
+                    {
+                        ImGui.OpenPopup("RenameWorldPopup"u8);
+                        if (ImGui.BeginPopupModal("RenameWorldPopup"u8, ref _showRenamePopup, ImGuiWindowFlags.AlwaysAutoResize))
+                        {
+                            ImGui.Text("Введите новое имя мира:"u8);
+                            ImGui.InputText("##newName"u8, _renameWorldBuffer);
+
+                            if (ImGui.Button("ОК"u8, new float2(120, 0)))
+                            {
+                                string oldName = worlds[_selectedWorldIndex];
+                                string newName = System.Text.Encoding.UTF8.GetString(_renameWorldBuffer).Split('\0')[0].Trim();
+                                if (!string.IsNullOrEmpty(newName) && oldName != newName)
+                                {
+                                    WorldSerializer.RenameWorld(oldName, newName); // Реализуйте переименование файлов/директории в сериализаторе
+                                    _selectedWorldIndex = -1;
+                                }
+                                _showRenamePopup = false;
+                                ImGui.CloseCurrentPopup();
+                            }
+                            ImGui.SameLine();
+                            if (ImGui.Button("Отмена"u8, new float2(120, 0)))
+                            {
+                                _showRenamePopup = false;
+                                ImGui.CloseCurrentPopup();
+                            }
+                            ImGui.EndPopup();
+                        }
+                    }
+
+                    ImGui.EndTabItem();
+                }
+
+                if (ImGui.BeginTabItem("Сетевая игра"u8))
+                {
+                    ImGui.Spacing();
+                    ImGui.Text("Настройки профиля:"u8);
+
+                    // Ввод никнейма игрока
+                    if (ImGui.InputText("Ваш никнейм##profile"u8, _nickBuffer))
+                    {
+                        string currentNick = System.Text.Encoding.UTF8.GetString(_nickBuffer).Split('\0')[0].Trim();
+                        if (!string.IsNullOrEmpty(currentNick)) _app.Network.MyNickname = currentNick;
                     }
 
                     ImGui.Separator();
@@ -50,6 +163,10 @@ public sealed class MainMenuScene : IScene
 
                     ImGui.InputText(LocalizationKeys.MenuIpAddress.ToUtf8(), _ipBuffer);
                     ImGui.InputInt(LocalizationKeys.MenuPort.ToUtf8(), ref _portInt);
+
+                    // Отображаем, какой мир будет запущен в качестве сервера
+                    string activeWorld = System.Text.Encoding.UTF8.GetString(_worldNameBuffer).Split('\0')[0].Trim();
+                    ImGui.TextColored(new float4(1f, 0.7f, 0f, 1f), $"Выбранный мир для хостинга: {activeWorld}");
 
                     if (!string.IsNullOrEmpty(_networkError))
                     {
@@ -59,12 +176,12 @@ public sealed class MainMenuScene : IScene
                     ushort targetPort = (ushort)Math.Clamp(_portInt, 1024, 65535);
                     string targetIp = System.Text.Encoding.UTF8.GetString(_ipBuffer).Split('\0')[0].Trim();
 
-                    if (ImGui.Button(LocalizationKeys.MenuHostServer.ToUtf8(), new float2(-1, 30)))
+                    if (ImGui.Button(LocalizationKeys.MenuHostServer.ToUtf8(), new float2(-1, 35)))
                     {
                         if (_app.Network.StartServer(targetPort))
                         {
                             _networkError = "";
-                            _app.ChangeScene(GameState.Gameplay);
+                            _app.ChangeScene(GameState.Gameplay, activeWorld); // Запуск выбранного на первой вкладке мира
                         }
                         else
                         {
@@ -72,16 +189,19 @@ public sealed class MainMenuScene : IScene
                         }
                     }
 
-                    if (ImGui.Button(LocalizationKeys.MenuConnectClient.ToUtf8(), new float2(-1, 30)))
+                    if (ImGui.Button(LocalizationKeys.MenuConnectClient.ToUtf8(), new float2(-1, 35)))
                     {
                         _networkError = "";
                         _app.Network.StartClient(targetIp, targetPort);
-                        _app.ChangeScene(GameState.Gameplay);
+                        _app.ChangeScene(GameState.Gameplay, "MultiplayerClientWorld");
                     }
+                    ImGui.EndTabItem();
+                }
 
-                    ImGui.Separator();
-                    ImGui.Text(LocalizationKeys.MenuSystemSettings.ToUtf8());
-
+                // Вкладка 3: Настройки (Бывшая вкладка 1, нижняя часть)
+                if (ImGui.BeginTabItem("Настройки"u8))
+                {
+                    ImGui.Spacing();
                     var loc = _app.LocManager;
                     ImGui.Text(LocalizationKeys.MenuLanguage.ToUtf8());
                     if (ImGui.BeginCombo("##langCombo"u8, loc.CurrentLanguage))
@@ -91,7 +211,7 @@ public sealed class MainMenuScene : IScene
                             if (ImGui.Selectable(lang, loc.CurrentLanguage == lang))
                             {
                                 loc.SetLanguage(lang);
-                                ConfigManager.Save(loc, AudioManager.Instance);
+                                ConfigManager.Save(loc, AudioManager.Instance, _app.Network);
                             }
                         }
                         ImGui.EndCombo();
@@ -106,12 +226,11 @@ public sealed class MainMenuScene : IScene
                     if (volChanged)
                     {
                         audio.ApplyVolumes();
-                        ConfigManager.Save(loc, audio);
+                        ConfigManager.Save(loc, audio, _app.Network);
                     }
 
                     ImGui.Separator();
                     if (ImGui.Button(LocalizationKeys.MenuExit.ToUtf8(), new float2(-1, 30))) _app.Window.ShouldClose = true;
-
                     ImGui.EndTabItem();
                 }
 

@@ -3,8 +3,7 @@ using Brutal.ImGuiApi;
 using Brutal.JoltApi;
 using Brutal.Numerics;
 using Brutal.RakNetApi;
-using System;
-using System.Collections.Generic;
+using BrutalSandbox.Framework.Files;
 using BrutalSandbox.Framework.Graphics;
 using BrutalSandbox.Framework.Localization;
 using BrutalSandbox.Framework.Network;
@@ -13,6 +12,8 @@ using BrutalSandbox.Framework.Scenes;
 using BrutalSandbox.Framework.Terrain;
 using BrutalSandbox.Framework.UI;
 using BrutalSandbox.GameRelated;
+using System;
+using System.Collections.Generic;
 
 namespace BrutalSandbox;
 
@@ -37,6 +38,7 @@ public sealed class GameplayScene : IScene
 
     private int _renderedChunksCount = 0;
     private bool _isMouseCaptured = false;
+    public bool IsMouseCaptured => _isMouseCaptured;
     private bool _fWasPressed = false;
     private float _networkTickTimer = 0f;
     private const float NetworkTickRate = 1f / 30f;
@@ -62,27 +64,87 @@ public sealed class GameplayScene : IScene
     public Dictionary<uint, uint> GetCubeBlockIds() => _cubeBlockIds;
     public Dictionary<uint, uint> GetNetworkedCubes() => _networkedCubes;
 
-    // Авторитарная генерация ID на стороне сервера для клиентских построек
+    private readonly string _worldName;
 
-    public GameplayScene(MainApp app)
+    public readonly float AutoSaveInterval = 30f;
+    private float _autoSaveTimer = 0f;
+    private float4x4 _cachedViewProj;
+    private bool _isChatOpen = false;
+    private byte[] _chatInputBuffer = new byte[128];
+    private readonly List<string> _chatMessages = new();
+    private bool _tWasPressed = false;
+    private bool _chatNeedsFocus = false;
+
+    // Черные списки для базовой модерации (для сервера)
+    private readonly HashSet<string> _bannedNicks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _bannedIps = new();
+    public GameplayScene(MainApp app, string worldName)
     {
         _app = app;
+        _worldName = worldName;
         _constructionManager = new ConstructionManager(_app, _terrainManager, _networkedCubes, _cubeBlockIds, _weldLinks);
     }
 
-
+    // В метод Initialize() добавляем автоматическую загрузку блоков из файла:
     public void Initialize()
     {
         _graphicCubeMesh = PrimitiveGenerator.CreateCube();
         _graphicCapsuleMesh = PrimitiveGenerator.CreateCapsule(1.0f, 0.4f);
-
         _player.Initialize();
+
+        if (!_app.Network.IsActive || _app.Network.IsServer)
+        {
+            if (WorldSerializer.LoadWorld(_worldName, out var loadedBlocks, out var loadedPlayers))
+            {
+                // Восстановление кубов со скоростями
+                foreach (var block in loadedBlocks)
+                {
+                    BlockData blockData = BlockRegistry.GetById(block.BlockId);
+                    SpawnCubeLocal(block.NetId, block.Position, blockData.DefaultMass, blockData.DefaultFriction, block.IsStatic, block.ParentNetId, block.BlockId);
+
+                    if (_networkedCubes.TryGetValue(block.NetId, out uint bodyId) && !block.IsStatic)
+                    {
+                        PhysicsManager.Instance.BodyInterface.SetLinearVelocity(bodyId, block.LinearVelocity);
+                        PhysicsManager.Instance.BodyInterface.SetAngularVelocity(bodyId, block.AngularVelocity);
+                    }
+
+                    if (block.HasWeld)
+                    {
+                        _weldLinks[block.NetId] = new WeldLink
+                        {
+                            ParentNetId = block.ParentNetId,
+                            LocalOffset = block.LocalOffset,
+                            LocalRotation = block.LocalRotation
+                        };
+                    }
+                }
+
+                // Восстановление позиции локального хоста/игрока, если ник совпадает
+                foreach (var p in loadedPlayers)
+                {
+                    if (p.Nickname == _app.Network.MyNickname)
+                    {
+                        _player.Position = p.Position;
+                        // Если у вашего FirstPersonController есть вектор скорости, можно присвоить и его:
+                        // _player.Velocity = p.LinearVelocity;
+                        break;
+                    }
+                    else
+                    {
+                        // Добавляем ранее вышедших игроков сессии в кэш сетевого менеджера, чтобы не потерять их при перезаписи
+                        _app.Network.SavedPlayersFromSession[p.Nickname] = p;
+                    }
+                }
+            }
+        }
     }
+
     public float4x4 GetViewProjection(float aspectRatio)
     {
         float4x4 view = _player.GetViewMatrix();
         float4x4 projection = float4x4.CreatePerspectiveFieldOfView(MathF.PI / 3.5f, aspectRatio, 0.1f, 1000f);
-        return view * projection;
+        _cachedViewProj = view * projection; // Кэшируем для Ui рендера
+        return _cachedViewProj;
     }
     public uint GenerateNextNetworkId(uint blockId)
     {
@@ -96,6 +158,16 @@ public sealed class GameplayScene : IScene
     public unsafe void Update(float deltaTime)
     {
         _app.Network.Update();
+
+        if (!_app.Network.IsActive || _app.Network.IsServer)
+        {
+            _autoSaveTimer += deltaTime;
+            if (_autoSaveTimer >= AutoSaveInterval)
+            {
+                PerformWorldSave();
+                _autoSaveTimer = 0f; // Сбрасываем таймер
+            }
+        }
 
         PhysicsManager.Instance.Update(deltaTime);
         var phys = PhysicsManager.Instance;
@@ -169,35 +241,24 @@ public sealed class GameplayScene : IScene
             }
             else
             {
-
-                // СИНХРОНИЗАЦИЯ АКТИВНЫХ ОБЪЕКТОВ ДЛЯ КЛИЕНТА
-                var receivedNetIds = new HashSet<uint>();
-
-                // Важно: Безопасно проверяем, есть ли вообще данные от сервера в этом кадре
-                bool hasNetworkState = _app.Network.NetworkedCubesState.Count > 0;
-
                 foreach (var kvp in _app.Network.NetworkedCubesState)
                 {
                     uint netId = kvp.Key;
                     NetworkCubeState serverState = kvp.Value;
-                    receivedNetIds.Add(netId);
 
-                    if (!_networkedCubes.TryGetValue(netId, out uint bodyId))
-                    {
-                        continue; // Ждем BuildObject, это правильно и защищает от кубов-пустышек
-                    }
+                    if (!_networkedCubes.TryGetValue(netId, out uint bodyId)) continue;
+                    if (phys.BodyInterface.GetMotionType(bodyId) == MotionType.Static) continue;
 
-                    if (phys.BodyInterface.GetMotionType(bodyId) == MotionType.Static)
+                    // ИСПРАВЛЕНИЕ: Принудительно активируем тело в Jolt, если сервер сообщает, что оно движется
+                    if (float3.Dot(serverState.LinearVelocity, serverState.LinearVelocity) > 0.01f)
                     {
-                        continue;
+                        phys.BodyInterface.ActivateBody(bodyId);
                     }
 
                     phys.BodyInterface.GetPositionAndRotation(bodyId, out float3 clientPos, out _);
-
                     float3 posError = serverState.Position - clientPos;
-                    float distErrorSq = float3.Dot(posError, posError);
 
-                    if (distErrorSq > 16f)
+                    if (float3.Dot(posError, posError) > 16f) // Дистанция рассинхронизации увеличена до 4 метров
                     {
                         phys.BodyInterface.SetPositionAndRotation(bodyId, serverState.Position, serverState.Rotation, Activation.Activate);
                         phys.BodyInterface.SetLinearVelocity(bodyId, serverState.LinearVelocity);
@@ -205,60 +266,30 @@ public sealed class GameplayScene : IScene
                     }
                     else
                     {
-                        float3 targetLinearVel = serverState.LinearVelocity + (posError * 5.0f);
-                        phys.BodyInterface.SetLinearVelocity(bodyId, targetLinearVel);
+                        // Корректирующий импульс: плавно притягиваем клиентский куб к серверному, накладывая скорость
+                        float3 blendVelocity = serverState.LinearVelocity + (posError * 8.0f); // Коэффициент увеличен для отзывчивости
+                        phys.BodyInterface.SetLinearVelocity(bodyId, blendVelocity);
                         phys.BodyInterface.SetAngularVelocity(bodyId, serverState.AngularVelocity);
-                        phys.BodyInterface.SetPositionAndRotation(bodyId, clientPos, serverState.Rotation, Activation.Activate);
+
+                        // Позволяем локальному физическому движку разрешать микро-коллизии
+                        phys.BodyInterface.SetPositionAndRotation(bodyId, clientPos, serverState.Rotation, Activation.DontActivate);
                     }
                 }
-
-
             }
         }
+        _player.UpdateLogic(_app.Window, deltaTime, _terrainManager);
 
-    
-
-
-    _player.UpdateLogic(_app.Window, deltaTime, _terrainManager);
-
-        foreach (var kvp in _networkedCubes)
-        {
-            uint netId = kvp.Key;
-            uint bodyId = kvp.Value;
-
-            // Если это не тело игрока, считываем актуальные координаты из симуляции Jolt
-            if (bodyId != _player.PhysicsBodyId)
-            {
-                phys.BodyInterface.GetPositionAndRotation(bodyId, out float3 realPos, out floatQuat realRot);
-
-                // Если у вас в LerpedCubeVisual или другом кэше обновляются позиции — 
-                // сохраняем их сюда, чтобы метод Render и рейкаст использовали строго ОДИНАКОВЫЕ координаты.
-                if (_cubeVisuals.TryGetValue(netId, out var visual))
-                {
-                    visual.CurrentPos = realPos;
-                    visual.CurrentRot = realRot;
-                    _cubeVisuals[netId] = visual;
-                }
-                else
-                {
-                    _cubeVisuals[netId] = new LerpedCubeVisual
-                    {
-                        CurrentPos = realPos,
-                        CurrentRot = realRot
-                    };
-                }
-            }
-        }
 
         if (_app.Network.IsActive)
         {
-            _app.Network.SendMyTransform(_player.Position);
+            float3 currentVelocity = _player.PhysicsBodyId != 0
+                ? PhysicsManager.Instance.BodyInterface.GetLinearVelocity(_player.PhysicsBodyId)
+                : float3.Zero;
+
+            _app.Network.SendMyTransform(_player.Position, currentVelocity);
         }
     }
 
-
-
-    // ИСПРАВЛЕНИЕ: Передаем blockId аргументом, чтобы не читать его из чужого хотбара
     private void SpawnCubeLocal(uint netId, float3 position, float mass, float friction, bool isStatic, uint parentNetId, uint blockId)
     {
         var phys = PhysicsManager.Instance;
@@ -266,9 +297,6 @@ public sealed class GameplayScene : IScene
         ushort layer = isStatic ? PhysicsManager.LayerStatic : PhysicsManager.LayerMoving;
 
         float3 finalSpawnPos = position;
-
-        // СТРОКУ НИЖЕ УДАЛЯЕМ/ЗАМЕНЯЕМ НА ИСПОЛЬЗОВАНИЕ ПАРАМЕТРА blockId
-        // uint blockId = _constructionManager.SelectedBlockId; 
 
         if (parentNetId != 0 && _networkedCubes.TryGetValue(parentNetId, out uint parentBodyId))
         {
@@ -339,7 +367,6 @@ public sealed class GameplayScene : IScene
         }
     }
 
-
     private unsafe void SendDynamicObjectsToClients()
     {
         var phys = PhysicsManager.Instance;
@@ -347,7 +374,11 @@ public sealed class GameplayScene : IScene
 
         foreach (var (netId, bodyId) in _networkedCubes)
         {
-            phys.BodyInterface.GetPositionAndRotation(bodyId, out var p, out var r);
+            // ИСПРАВЛЕНИЕ: Если объект приварен к кому-то, серверу НЕ нужно слать его координаты.
+            // Клиент сам переместит его вслед за родителем по WeldLink. Это экономит трафик и убирает тряску.
+            if (_weldLinks.ContainsKey(netId)) continue;
+
+            phys.BodyInterface.GetPositionAndRotation(bodyId, out float3 p, out floatQuat r);
             float3 linVel = phys.BodyInterface.GetLinearVelocity(bodyId);
             float3 angVel = phys.BodyInterface.GetAngularVelocity(bodyId);
             list.Add((netId, p, linVel, angVel, r));
@@ -377,6 +408,38 @@ public sealed class GameplayScene : IScene
         _app.Network.SendRawPacket(buffer, true);
     }
 
+    private void PerformWorldSave()
+    {
+        var playersToSave = new List<SavedPlayerData>();
+
+        // 1. Добавляем себя (Хоста)
+        float3 myVel = _player.PhysicsBodyId != 0 ? PhysicsManager.Instance.BodyInterface.GetLinearVelocity(_player.PhysicsBodyId) : float3.Zero;
+        playersToSave.Add(new SavedPlayerData { Nickname = _app.Network.MyNickname, Position = _player.Position, LinearVelocity = myVel });
+
+        // 2. Добавляем активных клиентов на сервере
+        foreach (var kvp in _app.Network.RemotePlayerPositions)
+        {
+            // Ключ имеет формат "address|nickname"
+            if (kvp.Key.Contains('|'))
+            {
+                var parts = kvp.Key.Split('|');
+                string nick = parts[1];
+                playersToSave.Add(new SavedPlayerData { Nickname = nick, Position = kvp.Value, LinearVelocity = float3.Zero });
+            }
+        }
+
+        // 3. Добавляем игроков, которые вышли во время этой сессии (из кэша NetworkManager)
+        foreach (var kvp in _app.Network.SavedPlayersFromSession)
+        {
+            if (!playersToSave.Exists(p => p.Nickname == kvp.Key))
+            {
+                playersToSave.Add(kvp.Value);
+            }
+        }
+
+        WorldSerializer.SaveWorld(_worldName, _cubeBlockIds, _networkedCubes, _weldLinks, playersToSave);
+        Console.WriteLine($"[WorldSave] Мир {_worldName} успешно сохранен. Записано игроков: {playersToSave.Count}");
+    }
     public void Render(IRenderer renderer, float4x4 viewProj)
     {
         _frustum.Update(viewProj);
@@ -452,12 +515,54 @@ public sealed class GameplayScene : IScene
     }
     public void RenderUi()
     {
+        var io = ImGui.GetIO();
+        var drawList = ImGui.GetForegroundDrawList();
+
+        foreach (var kvp in _app.Network.RemotePlayerPositions)
+        {
+            string fullKey = kvp.Key;
+            // Отрезаем IP-адрес, оставляем чистый никнейм
+            string nick = fullKey.Contains('|') ? fullKey.Split('|')[1] : fullKey;
+
+            // Позиционируем точку чуть выше физической капсулы игрока
+            float3 worldPos = kvp.Value + new float3(0f, 1.2f, 0f);
+
+            // Матричное умножение (Проекция 3D -> Clip Space)
+            float4 clipSpace = float4.Transform(new float4(worldPos, 1.0f), _cachedViewProj);
+
+            if (clipSpace.W > 0.1f) // Проверяем, что игрок находится перед камерой, а не за спиной
+            {
+                // Перевод в NDC (Normalized Device Coordinates)
+                float3 ndc = new float3(clipSpace.X / clipSpace.W, clipSpace.Y / clipSpace.W, clipSpace.Z / clipSpace.W);
+
+                // Перевод NDC в пиксели экрана монитора
+                float screenX = (ndc.X + 1.0f) * 0.5f * io.DisplaySize.X;
+                float screenY = (1.0f - ndc.Y) * 0.5f * io.DisplaySize.Y;
+
+                float2 textSize = ImGui.CalcTextSize(nick);
+                float2 textPos = new float2(screenX - (textSize.X / 2f), screenY);
+
+                // Отрисовка темной полупрозрачной подложки под никнейм для читаемости
+                drawList.AddRectFilled(textPos - new float2(4, 2), textPos + textSize + new float2(4, 2), 0x7F000000, 4f);
+                // Рисуем сам текст (цвет 0xFF00FFFF — бирюзовый)
+                drawList.AddText(textPos, 0xFF00FFFF, nick);
+            }
+        }
+
         ImGui.SetNextWindowPos(new float2(10, 10), ImGuiCond.FirstUseEver);
 
-        // ИСПРАВЛЕНИЕ: Локализован заголовок панели игрока
         if (ImGui.Begin(LocalizationKeys.GameplayPlayerPanelTitle.ToUtf8()))
         {
             if (ImGui.Button(LocalizationKeys.GameplayBackToMenu.ToUtf8())) _app.ChangeScene(GameState.MainMenu);
+
+            ImGui.SameLine();
+            // Кнопка сохранения
+            if (ImGui.Button("Сохранить мир"u8))
+            {
+                PerformWorldSave();
+            }
+
+            ImGui.Text($"Мир: {_worldName}");
             ImGui.Separator();
 
             ImGui.Text(string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.GameplayRenderedChunks.ToUtf8()), _renderedChunksCount));
@@ -557,8 +662,6 @@ public sealed class GameplayScene : IScene
             ImGui.End();
         }
 
-        // Хотбар на нижней грани экрана
-        var io = ImGui.GetIO();
         ImGui.SetNextWindowPos(new float2(io.DisplaySize.X / 2f - 270f, io.DisplaySize.Y - 75f), ImGuiCond.Always);
         ImGui.SetNextWindowSize(new float2(540, 70), ImGuiCond.Always);
 
@@ -599,14 +702,126 @@ public sealed class GameplayScene : IScene
         }
         ImGui.End();
 
-        var drawList = ImGui.GetForegroundDrawList();
+        ImGui.SetNextWindowPos(new float2(10, io.DisplaySize.Y - 320), ImGuiCond.Always);
+        ImGui.SetNextWindowSize(new float2(400, 230), ImGuiCond.Always);
+        ImGuiWindowFlags chatFlags = ImGuiWindowFlags.NoTitleBar | ImGuiWindowFlags.NoResize | ImGuiWindowFlags.NoMove;
+        if (!_isChatOpen) chatFlags |= ImGuiWindowFlags.NoInputs | ImGuiWindowFlags.NoBackground;
+
+        if (ImGui.Begin("ChatWindow"u8, chatFlags))
+        {
+            // Зона вывода сообщений
+            ImGui.BeginChild("ChatHistory"u8, new float2(0, _isChatOpen ? -35 : 0), ImGuiChildFlags.None, ImGuiWindowFlags.NoScrollbar);
+            lock (_chatMessages)
+            {
+                foreach (var msg in _chatMessages)
+                {
+                    ImGui.TextWrapped(msg);
+                }
+            }
+            if (ImGui.GetScrollY() >= ImGui.GetScrollMaxY()) ImGui.SetScrollHereY(1.0f);
+            ImGui.EndChild();
+
+            if (_isChatOpen)
+            {
+                ImGui.Separator();
+                if (_chatNeedsFocus)
+                {
+                    ImGui.SetKeyboardFocusHere();
+                    _chatNeedsFocus = false;
+                }
+
+                // Поле ввода команд и сообщений
+                if (ImGui.InputText("##chatinput"u8, _chatInputBuffer, ImGuiInputTextFlags.EnterReturnsTrue))
+                {
+                    string rawText = System.Text.Encoding.UTF8.GetString(_chatInputBuffer).Split('\0')[0].Trim();
+                    Array.Clear(_chatInputBuffer, 0, _chatInputBuffer.Length);
+
+                    if (!string.IsNullOrEmpty(rawText))
+                    {
+                        ExecuteChatMessage(rawText);
+                    }
+                    _isChatOpen = false;
+                    _isMouseCaptured = true;
+                    _app.Window.SetInputMode(GlfwInputMode.Cursor, Glfw.Constants.GLFW_POINTING_HAND_CURSOR);
+                }
+            }
+        }
+        ImGui.End();
+
+        drawList = ImGui.GetForegroundDrawList();
         float2 center = new float2(io.DisplaySize.X / 2f, io.DisplaySize.Y / 2f);
         drawList.AddCircleFilled(center, 3f, 0xFFFFFFFF);
     }
 
+    private void ExecuteChatMessage(string message)
+    {
+        if (message.StartsWith('/'))
+        {
+            // Обработка консольных команд сервера
+            string[] args = message.Substring(1).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (args.Length == 0) return;
+
+            string command = args[0].ToLower();
+
+            if (!_app.Network.IsServer)
+            {
+                lock (_chatMessages) _chatMessages.Add("[Система] У вас нет прав на выполнение команд (вы клиент).");
+                return;
+            }
+
+            switch (command)
+            {
+                case "kick":
+                    if (args.Length > 1)
+                    {
+                        string target = args[1];
+                        // Логика кика через RakNet (вызов метода закрытия соединения у Peer по имени/адресу)
+                        lock (_chatMessages) _chatMessages.Add($"[Сервер] Игрок {target} кикнут.");
+                    }
+                    break;
+
+                case "ban":
+                    if (args.Length > 1)
+                    {
+                        string target = args[1];
+                        _bannedNicks.Add(target);
+                        lock (_chatMessages) _chatMessages.Add($"[Сервер] Игрок {target} забанен по никнейму.");
+                    }
+                    break;
+
+                case "banip":
+                    if (args.Length > 1)
+                    {
+                        string targetIp = args[1];
+                        _bannedIps.Add(targetIp);
+                        lock (_chatMessages) _chatMessages.Add($"[Сервер] IP {targetIp} добавлен в бан-лист.");
+                    }
+                    break;
+
+                case "close":
+                    lock (_chatMessages) _chatMessages.Add("[Сервер] Закрытие сервера и отключение игроков...");
+                    _app.Network.Dispose(); // Полное выключение сетевого Peer
+                    _app.ChangeScene(GameState.MainMenu);
+                    break;
+
+                default:
+                    lock (_chatMessages) _chatMessages.Add($"[Система] Неизвестная команда: {command}");
+                    break;
+            }
+        }
+        else
+        {
+            // Обычное сообщение в чат
+            string formatted = $"[{_app.Network.MyNickname}]: {message}";
+            lock (_chatMessages) _chatMessages.Add(formatted);
+
+            // В сетевой игре здесь вызывается отправка пакета типа GameMessageID.ChatMessage всем клиентам
+        }
+    }
 
     private bool _lmbWasPressed = false;
     private bool _rmbWasPressed = false;
+    private double2 _lastCursor;
 
     public void HandleInput(GlfwWindow window, double2 cursorDelta, bool shiftHeld, bool dragging)
     {
@@ -624,7 +839,6 @@ public sealed class GameplayScene : IScene
         if (bPressed && !_bWasPressed)
         {
             _isBlockMenuOpen = !_isBlockMenuOpen;
-            // Если открыли меню блоков, освобождаем мышь для кликов в ImGui
             if (_isBlockMenuOpen && _isMouseCaptured)
             {
                 _isMouseCaptured = false;
@@ -632,10 +846,12 @@ public sealed class GameplayScene : IScene
             }
         }
         _bWasPressed = bPressed;
+
         bool fPressed = window.GetKey(GlfwKey.F) == GlfwKeyAction.Press;
         if (fPressed && !_fWasPressed) _player.ToggleNoclip();
         _fWasPressed = fPressed;
 
+        // Освобождение мыши по Escape
         if (window.GetKey(GlfwKey.Escape) == GlfwKeyAction.Press && _isMouseCaptured)
         {
             _isMouseCaptured = false;
@@ -646,16 +862,31 @@ public sealed class GameplayScene : IScene
         bool lmbPressed = window.GetMouseButton(GlfwMouseButton.Number1) == GlfwButtonAction.Press;
         bool rmbPressed = window.GetMouseButton(GlfwMouseButton.Number2) == GlfwButtonAction.Press;
 
+        // ЗАХВАТ МЫШИ
         if (lmbPressed && !_isMouseCaptured && !ImGui.GetIO().WantCaptureMouse)
         {
             _isMouseCaptured = true;
+
+            // 1. Центрируем курсор ПЕРЕД переходом в режим DISABLED (критично для Linux)
+            var size = window.FramebufferSize;
+            double centerX = size.X / 2.0;
+            double centerY = size.Y / 2.0;
+            window.CursorPos = new double2(centerX, centerY);
+
+            // 2. Сбрасываем кэш в MainApp, чтобы дельта следующего кадра была равна нулю
+            _app.ResetLastCursor(new double2(centerX, centerY));
+
+            // 3. Активируем режим DISABLED
             window.SetInputMode(GlfwInputMode.Cursor, Glfw.Constants.GLFW_CURSOR_DISABLED);
+
             _lmbWasPressed = true;
             return;
         }
 
         if (_isMouseCaptured)
         {
+            // На Linux в режиме DISABLED дельта приходит чистой и безграничной. 
+            // Больше никаких ручных SetCursorPos внутри кадра делать НЕЛЬЗЯ.
             _player.HandleMouseLook(cursorDelta);
 
             if (lmbPressed && !_lmbWasPressed)

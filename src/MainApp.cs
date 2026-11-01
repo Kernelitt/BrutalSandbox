@@ -52,6 +52,8 @@ public sealed class MainApp : IDisposable
 
     private NetworkManager _networkManager;
     public NetworkManager Network => _networkManager;
+    private string _currentWorldName = "New World";
+    public string CurrentWorldName { get => _currentWorldName; set => _currentWorldName = value; }
 
     public MainApp(GlfwWindow window, bool useOpenGl)
     {
@@ -69,7 +71,7 @@ public sealed class MainApp : IDisposable
         _locManager = new LocalizationManager();
         _locManager.SetLanguage("ru_RU");
 
-        ConfigManager.Load(_locManager, AudioManager.Instance);
+        ConfigManager.Load(_locManager, AudioManager.Instance, Network);
 
         _imGuiContext = ImGui.CreateContext();
         ImGui.GetIO().IniFilename = null;
@@ -88,7 +90,8 @@ public sealed class MainApp : IDisposable
 
         var fonts = io.Fonts;
         fonts.SetFontLoader(ImGuiFreeType.GetFontLoader());
-        _imGuiFont = fonts.AddFontFromFileTTF("fonts\\BrianneTod.ttf"u8, 36f);
+        string fontPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets", "fonts", "BrianneTod.ttf");
+        _imGuiFont = fonts.AddFontFromFileTTF(System.Text.Encoding.UTF8.GetBytes(fontPath), 36f);
 
         _lastCursor = window.CursorPos;
 
@@ -98,8 +101,9 @@ public sealed class MainApp : IDisposable
         ChangeScene(GameState.MainMenu);
     }
 
-    public void ChangeScene(GameState state)
+    public void ChangeScene(GameState state, string worldName = "New World")
     {
+        _currentWorldName = worldName;
         _nextState = state;
     }
 
@@ -118,7 +122,7 @@ public sealed class MainApp : IDisposable
                 break;
             case GameState.Gameplay:
                 AudioManager.Instance.PlayMusic(_assetManager.GetMusic("Chipper-Doodle"));
-                _currentScene = new GameplayScene(this);
+                _currentScene = new GameplayScene(this, _currentWorldName); // Передаем имя мира в сцену
                 break;
         }
 
@@ -274,7 +278,6 @@ public sealed class MainApp : IDisposable
 
     private void ProcessInput()
     {
-
         bool f3Pressed = _window.GetKey(GlfwKey.F3) == GlfwKeyAction.Press;
         if (f3Pressed && !_f3WasPressed)
         {
@@ -283,17 +286,27 @@ public sealed class MainApp : IDisposable
         _f3WasPressed = f3Pressed;
 
         var cursor = _window.CursorPos;
+
+        // Считаем чистую дельту перемещения
         var delta = new double2(cursor.X - _lastCursor.X, cursor.Y - _lastCursor.Y);
+        _lastCursor = cursor;
 
         if (!ImGui.GetIO().WantCaptureMouse)
         {
             var shiftHeld = _window.GetKey(GlfwKey.LeftShift) != GlfwKeyAction.Release;
             var dragging = _window.GetMouseButton(GlfwMouseButton.Number1) == GlfwButtonAction.Press;
+
+            // Передаем инпут в сцену
             _currentScene?.HandleInput(_window, delta, shiftHeld, dragging);
         }
-
-        _lastCursor = cursor;
     }
+
+    // Добавьте этот публичный метод в класс MainApp, чтобы сцена могла сбросить сохраненный курсор
+    public void ResetLastCursor(double2 position)
+    {
+        _lastCursor = position;
+    }
+
 
     private void UpdateFpsMetrics()
     {

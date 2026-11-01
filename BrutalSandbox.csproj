@@ -6,8 +6,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-
-    <!-- ОПТИМИЗАЦИЯ ДЛЯ СТАБИЛЬНОГО И КОМПАКТНОГО РЕЛИЗА -->
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <PublishTrimmed>true</PublishTrimmed>
@@ -19,30 +17,18 @@
     <IncludeNativeFmod>true</IncludeNativeFmod>
   </PropertyGroup>
 
-  <!-- АВТОМАТИЧЕСКОЕ КОПИРОВАНИЕ ДИРЕКТОРИЙ ИГРЫ -->
   <ItemGroup>
     <None Update="assets\**\*.*">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Update="fonts\**\*.*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Update="localizations\**\*.*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
-
-  <!-- АВТОМАТИЧЕСКИЙ СБОР И УПАКОВКА ФАЙЛОВ FMOD С ВАШЕГО ДИСКА ПОД ВСЕ ОС -->
   
   <!-- 1. Для Windows (win-x64): забираем fmod.dll -->
-  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-x64' Or '$(RuntimeIdentifier)' == ''">
-    <Content Include="C:\Program Files (x86)\FMOD SoundSystem\FMOD Studio API Windows\api\core\lib\x64\fmod.dll" Link="fmod.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <PublishState>Included</PublishState>
-    </Content>
-  </ItemGroup>
 
-  <!-- 2. Для Linux (linux-x64): автоматически забираем libfmod.so из распакованного вами SDK -->
+  <!-- 2. Для Linux (linux-x64): забираем libfmod.so-->
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'linux-x64'">
     <Content Include="C:\Program Files (x86)\FMOD SoundSystem\fmodstudioapi20315linux\api\core\lib\x86_64\libfmod.so" Link="libfmod.so">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -50,7 +36,7 @@
     </Content>
   </ItemGroup>
 
-  <!-- 3. Для macOS (osx-arm64): автоматически забираем libfmod.dylib из API программиста -->
+  <!-- 3. Для macOS (osx-arm64): забираем libfmod.dylib-->
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'osx-arm64'">
     <Content Include="C:\Program Files (x86)\FMOD SoundSystem\FMOD Programmers API\api\core\lib\libfmod.dylib" Link="libfmod.dylib">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

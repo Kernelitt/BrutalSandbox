@@ -166,95 +166,93 @@ public sealed class ConstructionManager
             float3 spawnPos = safeHitPoint + (hitNormal * offsetDistance);
             uint parentCubeId = (BuildIsWelded && !finalIsStatic && hitBodyId != 0) ? targetNetId : 0;
 
-            if (parentCubeId == 0)
+
+            // Мы всегда считаем выровненную позицию spawnPos, независимо от parentCubeId
+            if (hitBodyId != 0)
             {
-                if (hitBodyId != 0)
+                // Строим относительно родителя
+                float3 localSpawn = spawnPos - targetCenter;
+
+                float stepX = (targetIsPlatform && currentBlock.Shape == BlockShape.Platform) ? 3.0f : 1.0f;
+                float stepZ = (targetIsPlatform && currentBlock.Shape == BlockShape.Platform) ? 3.0f : 1.0f;
+
+                float gridX = MathF.Round(localSpawn.X / stepX, MidpointRounding.AwayFromZero) * stepX;
+                float gridY = localSpawn.Y;
+                float gridZ = MathF.Round(localSpawn.Z / stepZ, MidpointRounding.AwayFromZero) * stepZ;
+
+                if (MathF.Abs(hitNormal.X) > 0.8f)
                 {
-                    // Строим относительно родителя
-                    float3 localSpawn = spawnPos - targetCenter;
-
-                    float stepX = (targetIsPlatform && currentBlock.Shape == BlockShape.Platform) ? 3.0f : 1.0f;
-                    float stepZ = (targetIsPlatform && currentBlock.Shape == BlockShape.Platform) ? 3.0f : 1.0f;
-
-                    float gridX = MathF.Round(localSpawn.X / stepX, MidpointRounding.AwayFromZero) * stepX;
-                    float gridY = localSpawn.Y;
-                    float gridZ = MathF.Round(localSpawn.Z / stepZ, MidpointRounding.AwayFromZero) * stepZ;
-
-                    if (MathF.Abs(hitNormal.X) > 0.8f)
+                    gridX = hitNormal.X * offsetDistance;
+                }
+                if (MathF.Abs(hitNormal.Z) > 0.8f)
+                {
+                    gridZ = hitNormal.Z * offsetDistance;
+                }
+                if (MathF.Abs(hitNormal.Y) > 0.8f)
+                {
+                    if (currentBlock.Shape == BlockShape.Platform)
                     {
-                        gridX = hitNormal.X * offsetDistance;
-                    }
-                    if (MathF.Abs(hitNormal.Z) > 0.8f)
-                    {
-                        gridZ = hitNormal.Z * offsetDistance;
-                    }
-                    if (MathF.Abs(hitNormal.Y) > 0.8f)
-                    {
-                        if (currentBlock.Shape == BlockShape.Platform)
-                        {
-                            float localY = hitNormal.Y > 0f ? MathF.Floor(localSpawn.Y * 5f) / 5f : MathF.Ceiling(localSpawn.Y * 5f) / 5f;
-                            gridY = MathF.Round(localY * 5f, MidpointRounding.AwayFromZero) / 5f;
-                        }
-                        else
-                        {
-                            gridY = hitNormal.Y * offsetDistance;
-                        }
+                        float localY = hitNormal.Y > 0f ? MathF.Floor(localSpawn.Y * 5f) / 5f : MathF.Ceiling(localSpawn.Y * 5f) / 5f;
+                        gridY = MathF.Round(localY * 5f, MidpointRounding.AwayFromZero) / 5f;
                     }
                     else
                     {
-                        gridY = 0f;
+                        gridY = hitNormal.Y * offsetDistance;
                     }
-
-                    spawnPos = targetCenter + new float3(gridX, gridY, gridZ);
                 }
                 else
                 {
-                    // Строим на голой земле
-                    float stepX = (currentBlock.Shape == BlockShape.Platform) ? 3.0f : 1.0f;
-                    float stepZ = (currentBlock.Shape == BlockShape.Platform) ? 3.0f : 1.0f;
+                    gridY = 0f; // Примечание: проверьте, не зануляет ли это высоту, если строить на боковой грани
+                }
 
-                    float gridX = MathF.Round(spawnPos.X / stepX, MidpointRounding.AwayFromZero) * stepX;
-                    float gridY = spawnPos.Y;
-                    float gridZ = MathF.Round(spawnPos.Z / stepZ, MidpointRounding.AwayFromZero) * stepZ;
+                spawnPos = targetCenter + new float3(gridX, gridY, gridZ);
+            }
+            else
+            {
+                // Строим на голой земле (код остается прежним)
+                float stepX = (currentBlock.Shape == BlockShape.Platform) ? 3.0f : 1.0f;
+                float stepZ = (currentBlock.Shape == BlockShape.Platform) ? 3.0f : 1.0f;
 
-                    if (MathF.Abs(hitNormal.X) > 0.8f) gridX = MathF.Round(spawnPos.X / stepX, MidpointRounding.AwayFromZero) * stepX;
-                    if (MathF.Abs(hitNormal.Z) > 0.8f) gridZ = MathF.Round(spawnPos.Z / stepZ, MidpointRounding.AwayFromZero) * stepZ;
+                float gridX = MathF.Round(spawnPos.X / stepX, MidpointRounding.AwayFromZero) * stepX;
+                float gridY = spawnPos.Y;
+                float gridZ = MathF.Round(spawnPos.Z / stepZ, MidpointRounding.AwayFromZero) * stepZ;
 
-                    if (MathF.Abs(hitNormal.Y) > 0.8f)
+                if (MathF.Abs(hitNormal.X) > 0.8f) gridX = MathF.Round(spawnPos.X / stepX, MidpointRounding.AwayFromZero) * stepX;
+                if (MathF.Abs(hitNormal.Z) > 0.8f) gridZ = MathF.Round(spawnPos.Z / stepZ, MidpointRounding.AwayFromZero) * stepZ;
+
+                if (MathF.Abs(hitNormal.Y) > 0.8f)
+                {
+                    if (currentBlock.Shape == BlockShape.Platform)
                     {
-                        if (currentBlock.Shape == BlockShape.Platform)
-                        {
-                            float localY = hitNormal.Y > 0f ? MathF.Floor(spawnPos.Y * 5f) / 5f : MathF.Ceiling(spawnPos.Y * 5f) / 5f;
-                            gridY = MathF.Round(localY * 5f, MidpointRounding.AwayFromZero) / 5f;
-                        }
-                        else
-                        {
-                            gridY = MathF.Round(spawnPos.Y, MidpointRounding.AwayFromZero);
-                        }
+                        float localY = hitNormal.Y > 0f ? MathF.Floor(spawnPos.Y * 5f) / 5f : MathF.Ceiling(spawnPos.Y * 5f) / 5f;
+                        gridY = MathF.Round(localY * 5f, MidpointRounding.AwayFromZero) / 5f;
                     }
                     else
                     {
                         gridY = MathF.Round(spawnPos.Y, MidpointRounding.AwayFromZero);
                     }
+                }
+                else
+                {
+                    gridY = MathF.Round(spawnPos.Y, MidpointRounding.AwayFromZero);
+                }
 
-                    spawnPos = new float3(gridX, gridY, gridZ);
+                spawnPos = new float3(gridX, gridY, gridZ);
 
-                    if (hitBodyId == 0 && hitNormal.Y > 0.9f)
-                    {
-                        float extX = currentExtents.X;
-                        float extZ = currentExtents.Z;
+                if (hitBodyId == 0 && hitNormal.Y > 0.9f)
+                {
+                    float extX = currentExtents.X;
+                    float extZ = currentExtents.Z;
 
-                        float h1 = _terrainManager.GetTerrainHeightAt(spawnPos.X - extX, spawnPos.Z - extZ);
-                        float h2 = _terrainManager.GetTerrainHeightAt(spawnPos.X + extX, spawnPos.Z - extZ);
-                        float h3 = _terrainManager.GetTerrainHeightAt(spawnPos.X - extX, spawnPos.Z + extZ);
-                        float h4 = _terrainManager.GetTerrainHeightAt(spawnPos.X + extX, spawnPos.Z + extZ);
-                        float hCenter = _terrainManager.GetTerrainHeightAt(spawnPos.X, spawnPos.Z);
+                    float h1 = _terrainManager.GetTerrainHeightAt(spawnPos.X - extX, spawnPos.Z - extZ);
+                    float h2 = _terrainManager.GetTerrainHeightAt(spawnPos.X + extX, spawnPos.Z - extZ);
+                    float h3 = _terrainManager.GetTerrainHeightAt(spawnPos.X - extX, spawnPos.Z + extZ);
+                    float h4 = _terrainManager.GetTerrainHeightAt(spawnPos.X + extX, spawnPos.Z + extZ);
+                    float hCenter = _terrainManager.GetTerrainHeightAt(spawnPos.X, spawnPos.Z);
 
-                        float maxHeight = MathF.Max(hCenter, MathF.Max(MathF.Max(h1, h2), MathF.Max(h3, h4)));
+                    float maxHeight = MathF.Max(hCenter, MathF.Max(MathF.Max(h1, h2), MathF.Max(h3, h4)));
 
-                        // Ставим объект четко на самую высокую точку ландшафта под ним
-                        spawnPos.Y = maxHeight + currentExtents.Y + 0.05f;
-                    }
+                    spawnPos.Y = maxHeight + currentExtents.Y + 0.05f;
                 }
             }
 
