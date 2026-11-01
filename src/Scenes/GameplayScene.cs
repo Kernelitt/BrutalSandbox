@@ -929,6 +929,7 @@ public sealed class GameplayScene : IScene
             {
                 _isMouseCaptured = false;
                 window.SetInputMode(GlfwInputMode.Cursor, Glfw.Constants.GLFW_CURSOR_NORMAL);
+                window.SetInputMode(GlfwInputMode.RawMouseMotion, 0);
             }
         }
         _bWasPressed = bPressed;
@@ -942,6 +943,7 @@ public sealed class GameplayScene : IScene
         {
             _isMouseCaptured = false;
             window.SetInputMode(GlfwInputMode.Cursor, Glfw.Constants.GLFW_CURSOR_NORMAL);
+            window.SetInputMode(GlfwInputMode.RawMouseMotion, 0);
             return;
         }
 
@@ -964,7 +966,7 @@ public sealed class GameplayScene : IScene
 
             // 3. Активируем режим DISABLED
             window.SetInputMode(GlfwInputMode.Cursor, Glfw.Constants.GLFW_CURSOR_DISABLED);
-
+            window.SetInputMode(GlfwInputMode.RawMouseMotion, 1); // 1 означает GLFW_TRUE
             _lmbWasPressed = true;
             return;
         }

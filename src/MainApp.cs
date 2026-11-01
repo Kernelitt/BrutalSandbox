@@ -296,7 +296,8 @@ public sealed class MainApp : IDisposable
             var shiftHeld = _window.GetKey(GlfwKey.LeftShift) != GlfwKeyAction.Release;
             var dragging = _window.GetMouseButton(GlfwMouseButton.Number1) == GlfwButtonAction.Press;
 
-            // Передаем инпут в сцену
+            
+
             _currentScene?.HandleInput(_window, delta, shiftHeld, dragging);
         }
     }
