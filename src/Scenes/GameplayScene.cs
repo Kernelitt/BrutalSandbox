@@ -266,12 +266,10 @@ public sealed class GameplayScene : IScene
                     }
                     else
                     {
-                        // Корректирующий импульс: плавно притягиваем клиентский куб к серверному, накладывая скорость
-                        float3 blendVelocity = serverState.LinearVelocity + (posError * 8.0f); // Коэффициент увеличен для отзывчивости
+                        float3 blendVelocity = serverState.LinearVelocity + (posError * 8.0f); 
                         phys.BodyInterface.SetLinearVelocity(bodyId, blendVelocity);
                         phys.BodyInterface.SetAngularVelocity(bodyId, serverState.AngularVelocity);
 
-                        // Позволяем локальному физическому движку разрешать микро-коллизии
                         phys.BodyInterface.SetPositionAndRotation(bodyId, clientPos, serverState.Rotation, Activation.DontActivate);
                     }
                 }
@@ -521,30 +519,23 @@ public sealed class GameplayScene : IScene
         foreach (var kvp in _app.Network.RemotePlayerPositions)
         {
             string fullKey = kvp.Key;
-            // Отрезаем IP-адрес, оставляем чистый никнейм
             string nick = fullKey.Contains('|') ? fullKey.Split('|')[1] : fullKey;
 
-            // Позиционируем точку чуть выше физической капсулы игрока
             float3 worldPos = kvp.Value + new float3(0f, 1.2f, 0f);
 
-            // Матричное умножение (Проекция 3D -> Clip Space)
             float4 clipSpace = float4.Transform(new float4(worldPos, 1.0f), _cachedViewProj);
 
-            if (clipSpace.W > 0.1f) // Проверяем, что игрок находится перед камерой, а не за спиной
+            if (clipSpace.W > 0.1f) 
             {
-                // Перевод в NDC (Normalized Device Coordinates)
                 float3 ndc = new float3(clipSpace.X / clipSpace.W, clipSpace.Y / clipSpace.W, clipSpace.Z / clipSpace.W);
 
-                // Перевод NDC в пиксели экрана монитора
                 float screenX = (ndc.X + 1.0f) * 0.5f * io.DisplaySize.X;
                 float screenY = (1.0f - ndc.Y) * 0.5f * io.DisplaySize.Y;
 
                 float2 textSize = ImGui.CalcTextSize(nick);
                 float2 textPos = new float2(screenX - (textSize.X / 2f), screenY);
 
-                // Отрисовка темной полупрозрачной подложки под никнейм для читаемости
                 drawList.AddRectFilled(textPos - new float2(4, 2), textPos + textSize + new float2(4, 2), 0x7F000000, 4f);
-                // Рисуем сам текст (цвет 0xFF00FFFF — бирюзовый)
                 drawList.AddText(textPos, 0xFF00FFFF, nick);
             }
         }
@@ -553,16 +544,23 @@ public sealed class GameplayScene : IScene
 
         if (ImGui.Begin(LocalizationKeys.GameplayPlayerPanelTitle.ToUtf8()))
         {
-            if (ImGui.Button(LocalizationKeys.GameplayBackToMenu.ToUtf8())) _app.ChangeScene(GameState.MainMenu);
+            if (ImGui.Button(LocalizationKeys.GameplayBackToMenu.ToUtf8()))
+            {
+                if (_app.Network.IsActive && _app.Network.IsServer)
+                {
+                    _app.Network.Dispose();
+                }
+                _app.ChangeScene(GameState.MainMenu);
+            }
 
             ImGui.SameLine();
-            // Кнопка сохранения
-            if (ImGui.Button("Сохранить мир"u8))
+            if (ImGui.Button(LocalizationKeys.GameplaySaveWorldBtn.ToUtf8()))
             {
                 PerformWorldSave();
             }
 
-            ImGui.Text($"Мир: {_worldName}");
+            string worldLabelFmt = string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.GameplayWorldLabel.ToUtf8()), _worldName);
+            ImGui.Text(worldLabelFmt);
             ImGui.Separator();
 
             ImGui.Text(string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.GameplayRenderedChunks.ToUtf8()), _renderedChunksCount));
@@ -730,7 +728,6 @@ public sealed class GameplayScene : IScene
                     _chatNeedsFocus = false;
                 }
 
-                // Поле ввода команд и сообщений
                 if (ImGui.InputText("##chatinput"u8, _chatInputBuffer, ImGuiInputTextFlags.EnterReturnsTrue))
                 {
                     string rawText = System.Text.Encoding.UTF8.GetString(_chatInputBuffer).Split('\0')[0].Trim();
@@ -742,7 +739,6 @@ public sealed class GameplayScene : IScene
                     }
                     _isChatOpen = false;
                     _isMouseCaptured = true;
-                    _app.Window.SetInputMode(GlfwInputMode.Cursor, Glfw.Constants.GLFW_POINTING_HAND_CURSOR);
                 }
             }
         }
@@ -751,6 +747,18 @@ public sealed class GameplayScene : IScene
         drawList = ImGui.GetForegroundDrawList();
         float2 center = new float2(io.DisplaySize.X / 2f, io.DisplaySize.Y / 2f);
         drawList.AddCircleFilled(center, 3f, 0xFFFFFFFF);
+    }
+    public void AddMessageLocally(string message)
+    {
+        lock (_chatMessages)
+        {
+            _chatMessages.Add(message);
+            // Ограничиваем историю чата, например, до 50 сообщений, чтобы не забивать память
+            if (_chatMessages.Count > 50)
+            {
+                _chatMessages.RemoveAt(0);
+            }
+        }
     }
 
     private void ExecuteChatMessage(string message)
@@ -765,7 +773,7 @@ public sealed class GameplayScene : IScene
 
             if (!_app.Network.IsServer)
             {
-                lock (_chatMessages) _chatMessages.Add("[Система] У вас нет прав на выполнение команд (вы клиент).");
+                lock (_chatMessages) _chatMessages.Add(System.Text.Encoding.UTF8.GetString(LocalizationKeys.ChatSystemNoRights.ToUtf8()));
                 return;
             }
 
@@ -775,8 +783,8 @@ public sealed class GameplayScene : IScene
                     if (args.Length > 1)
                     {
                         string target = args[1];
-                        // Логика кика через RakNet (вызов метода закрытия соединения у Peer по имени/адресу)
-                        lock (_chatMessages) _chatMessages.Add($"[Сервер] Игрок {target} кикнут.");
+                        string kickFmt = string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.ChatServerKicked.ToUtf8()), target);
+                        lock (_chatMessages) _chatMessages.Add(kickFmt);
                     }
                     break;
 
@@ -785,7 +793,8 @@ public sealed class GameplayScene : IScene
                     {
                         string target = args[1];
                         _bannedNicks.Add(target);
-                        lock (_chatMessages) _chatMessages.Add($"[Сервер] Игрок {target} забанен по никнейму.");
+                        string banFmt = string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.ChatServerBannedNick.ToUtf8()), target);
+                        lock (_chatMessages) _chatMessages.Add(banFmt);
                     }
                     break;
 
@@ -794,18 +803,20 @@ public sealed class GameplayScene : IScene
                     {
                         string targetIp = args[1];
                         _bannedIps.Add(targetIp);
-                        lock (_chatMessages) _chatMessages.Add($"[Сервер] IP {targetIp} добавлен в бан-лист.");
+                        string banIpFmt = string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.ChatServerBannedIp.ToUtf8()), targetIp);
+                        lock (_chatMessages) _chatMessages.Add(banIpFmt);
                     }
                     break;
 
                 case "close":
-                    lock (_chatMessages) _chatMessages.Add("[Сервер] Закрытие сервера и отключение игроков...");
-                    _app.Network.Dispose(); // Полное выключение сетевого Peer
+                    lock (_chatMessages) _chatMessages.Add(System.Text.Encoding.UTF8.GetString(LocalizationKeys.ChatServerClosing.ToUtf8()));
+                    _app.Network.Dispose();
                     _app.ChangeScene(GameState.MainMenu);
                     break;
 
                 default:
-                    lock (_chatMessages) _chatMessages.Add($"[Система] Неизвестная команда: {command}");
+                    string unknownCmdFmt = string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.ChatSystemUnknownCmd.ToUtf8()), command);
+                    lock (_chatMessages) _chatMessages.Add(unknownCmdFmt);
                     break;
             }
         }
@@ -833,6 +844,19 @@ public sealed class GameplayScene : IScene
         if (window.GetKey(GlfwKey.Number5) == GlfwKeyAction.Press) { _activeHotbarIndex = 4; _constructionManager.SelectedBlockId = _hotbarSlots[4]; }
         if (window.GetKey(GlfwKey.Number6) == GlfwKeyAction.Press) { _activeHotbarIndex = 5; _constructionManager.SelectedBlockId = _hotbarSlots[5]; }
         if (window.GetKey(GlfwKey.Number7) == GlfwKeyAction.Press) { _activeHotbarIndex = 6; _constructionManager.SelectedBlockId = _hotbarSlots[6]; }
+
+        bool tPressed = window.GetKey(GlfwKey.T) == GlfwKeyAction.Press;
+        if (tPressed && !_tWasPressed && _isMouseCaptured && !_isChatOpen)
+        {
+            _isChatOpen = true;
+            _isMouseCaptured = false;
+            _chatNeedsFocus = true;
+            window.SetInputMode(GlfwInputMode.Cursor, Glfw.Constants.GLFW_CURSOR_NORMAL);
+        }
+        _tWasPressed = tPressed;
+
+        // Если чат открыт, блокируем остальной игровой ввод (движение, строительство)
+        if (_isChatOpen) return;
 
         // Открытие/Закрытие меню блоков на кнопку B
         bool bPressed = window.GetKey(GlfwKey.B) == GlfwKeyAction.Press;

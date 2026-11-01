@@ -7,5 +7,6 @@ public enum GameMessageID : byte
     PlayerDisconnected = 3,
     SyncDynamicObjects = 4,
     BuildObject = 5,     
-    DestroyObject = 6     
+    DestroyObject = 6,
+    ChatMessage = 7
 }

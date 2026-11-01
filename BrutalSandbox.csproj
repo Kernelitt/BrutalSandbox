@@ -27,7 +27,12 @@
   </ItemGroup>
   
   <!-- 1. Для Windows (win-x64): забираем fmod.dll -->
-
+ <ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-x64'">
+    <Content Include="C:\Program Files (x86)\FMOD SoundSystem\FMOD Studio API Windows\api\core\lib\x64\fmod.dll" Link="fmod.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <PublishState>Included</PublishState>
+    </Content>
+  </ItemGroup>
   <!-- 2. Для Linux (linux-x64): забираем libfmod.so-->
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'linux-x64'">
     <Content Include="C:\Program Files (x86)\FMOD SoundSystem\fmodstudioapi20315linux\api\core\lib\x86_64\libfmod.so" Link="libfmod.so">

@@ -22,10 +22,14 @@ public sealed class MainMenuScene : IScene
 
     public MainMenuScene(MainApp app) => _app = app;
 
-    public void Initialize() { }
+    public void Initialize()
+    {
+        byte[] nickBytes = System.Text.Encoding.UTF8.GetBytes(_app.Network.MyNickname + new string('\0', 20));
+        Array.Copy(nickBytes, _nickBuffer, Math.Min(nickBytes.Length, _nickBuffer.Length));
+    }
+
     public void Update(float deltaTime) { }
     public void Render(IRenderer renderer, float4x4 viewProj) { }
-
 
     private byte[] _worldNameBuffer = System.Text.Encoding.UTF8.GetBytes("New World" + new string('\0', 20));
     private byte[] _nickBuffer = System.Text.Encoding.UTF8.GetBytes("Player_" + Random.Shared.Next(100, 999) + new string('\0', 20));
@@ -44,15 +48,15 @@ public sealed class MainMenuScene : IScene
             if (ImGui.BeginTabBar("MenuTabs"u8))
             {
                 // Вкладка 1: Миры и Одиночная игра
-                if (ImGui.BeginTabItem("Выбор мира"u8))
+                if (ImGui.BeginTabItem(LocalizationKeys.MenuWorldSelectTab.ToUtf8()))
                 {
                     ImGui.Spacing();
-                    ImGui.Text("Создать новый мир:"u8);
-                    ImGui.InputText("Имя мира##new"u8, _worldNameBuffer);
+                    ImGui.Text(LocalizationKeys.MenuCreateNewWorld.ToUtf8());
+                    ImGui.InputText(LocalizationKeys.MenuWorldNameLabel.ToUtf8(), _worldNameBuffer);
 
                     string newWorldName = System.Text.Encoding.UTF8.GetString(_worldNameBuffer).Split('\0')[0].Trim();
 
-                    if (ImGui.Button("Запустить новый мир", new float2(-1, 35)))
+                    if (ImGui.Button(LocalizationKeys.MenuLaunchNewWorld.ToUtf8(), new float2(-1, 35)))
                     {
                         if (!string.IsNullOrEmpty(newWorldName))
                         {
@@ -61,16 +65,15 @@ public sealed class MainMenuScene : IScene
                     }
 
                     ImGui.Separator();
-                    ImGui.Text("Доступные сохранения:"u8);
+                    ImGui.Text(LocalizationKeys.MenuAvailableSaves.ToUtf8());
 
                     var worlds = WorldSerializer.GetAvailableWorlds();
 
-                    // Список сохраненных миров во фрейме
                     if (ImGui.BeginChild("WorldsList"u8, new float2(-1, 150), ImGuiChildFlags.Borders))
                     {
                         if (worlds.Count == 0)
                         {
-                            ImGui.Text("Нет сохраненных миров."u8);
+                            ImGui.Text(LocalizationKeys.MenuNoSavedWorlds.ToUtf8());
                         }
                         else
                         {
@@ -79,7 +82,6 @@ public sealed class MainMenuScene : IScene
                                 if (ImGui.Selectable($"{worlds[i]}##world_{i}", _selectedWorldIndex == i))
                                 {
                                     _selectedWorldIndex = i;
-                                    // Копируем имя выбранного мира в буфер
                                     byte[] nameBytes = System.Text.Encoding.UTF8.GetBytes(worlds[i] + new string('\0', 20));
                                     Array.Copy(nameBytes, _worldNameBuffer, Math.Min(nameBytes.Length, _worldNameBuffer.Length));
                                 }
@@ -92,49 +94,50 @@ public sealed class MainMenuScene : IScene
                     {
                         string targetWorld = worlds[_selectedWorldIndex];
 
-                        if (ImGui.Button($"Загрузить мир: {targetWorld}", new float2(-1, 35)))
+                        string loadWorldFmt = string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.MenuLoadWorldBtn.ToUtf8()), targetWorld);
+                        if (ImGui.Button(loadWorldFmt, new float2(-1, 35)))
                         {
                             _app.ChangeScene(GameState.Gameplay, targetWorld);
                         }
 
                         ImGui.Spacing();
 
-                        if (ImGui.Button("Переименовать мир"u8, new float2(260, 30)))
+                        if (ImGui.Button(LocalizationKeys.MenuRenameWorldBtn.ToUtf8(), new float2(260, 30)))
                         {
                             _showRenamePopup = true;
                             byte[] currentNameBytes = System.Text.Encoding.UTF8.GetBytes(targetWorld + new string('\0', 20));
                             Array.Copy(currentNameBytes, _renameWorldBuffer, Math.Min(currentNameBytes.Length, _renameWorldBuffer.Length));
                         }
                         ImGui.SameLine();
-                        if (ImGui.Button("Удалить мир"u8, new float2(260, 30)))
+                        if (ImGui.Button(LocalizationKeys.MenuDeleteWorldBtn.ToUtf8(), new float2(260, 30)))
                         {
-                            WorldSerializer.DeleteWorld(targetWorld); // Убедитесь, что в вашем сериализаторе реализовано физическое удаление файлов мира
+                            WorldSerializer.DeleteWorld(targetWorld);
                             _selectedWorldIndex = -1;
                         }
                     }
 
                     if (_showRenamePopup)
                     {
-                        ImGui.OpenPopup("RenameWorldPopup"u8);
-                        if (ImGui.BeginPopupModal("RenameWorldPopup"u8, ref _showRenamePopup, ImGuiWindowFlags.AlwaysAutoResize))
+                        ImGui.OpenPopup(LocalizationKeys.MenuRenamePopupTitle.ToUtf8());
+                        if (ImGui.BeginPopupModal(LocalizationKeys.MenuRenamePopupTitle.ToUtf8(), ref _showRenamePopup, ImGuiWindowFlags.AlwaysAutoResize))
                         {
-                            ImGui.Text("Введите новое имя мира:"u8);
+                            ImGui.Text(LocalizationKeys.MenuEnterNewName.ToUtf8());
                             ImGui.InputText("##newName"u8, _renameWorldBuffer);
 
-                            if (ImGui.Button("ОК"u8, new float2(120, 0)))
+                            if (ImGui.Button(LocalizationKeys.MenuOk.ToUtf8(), new float2(120, 0)))
                             {
                                 string oldName = worlds[_selectedWorldIndex];
                                 string newName = System.Text.Encoding.UTF8.GetString(_renameWorldBuffer).Split('\0')[0].Trim();
                                 if (!string.IsNullOrEmpty(newName) && oldName != newName)
                                 {
-                                    WorldSerializer.RenameWorld(oldName, newName); // Реализуйте переименование файлов/директории в сериализаторе
+                                    WorldSerializer.RenameWorld(oldName, newName);
                                     _selectedWorldIndex = -1;
                                 }
                                 _showRenamePopup = false;
                                 ImGui.CloseCurrentPopup();
                             }
                             ImGui.SameLine();
-                            if (ImGui.Button("Отмена"u8, new float2(120, 0)))
+                            if (ImGui.Button(LocalizationKeys.MenuCancel.ToUtf8(), new float2(120, 0)))
                             {
                                 _showRenamePopup = false;
                                 ImGui.CloseCurrentPopup();
@@ -146,16 +149,20 @@ public sealed class MainMenuScene : IScene
                     ImGui.EndTabItem();
                 }
 
-                if (ImGui.BeginTabItem("Сетевая игра"u8))
+                // Вкладка 2: Сетевая игра
+                if (ImGui.BeginTabItem(LocalizationKeys.MenuMultiplayerTab.ToUtf8()))
                 {
                     ImGui.Spacing();
-                    ImGui.Text("Настройки профиля:"u8);
+                    ImGui.Text(LocalizationKeys.MenuProfileSettings.ToUtf8());
 
-                    // Ввод никнейма игрока
-                    if (ImGui.InputText("Ваш никнейм##profile"u8, _nickBuffer))
+                    if (ImGui.InputText(LocalizationKeys.MenuNicknameLabel.ToUtf8(), _nickBuffer))
                     {
                         string currentNick = System.Text.Encoding.UTF8.GetString(_nickBuffer).Split('\0')[0].Trim();
-                        if (!string.IsNullOrEmpty(currentNick)) _app.Network.MyNickname = currentNick;
+                        if (!string.IsNullOrEmpty(currentNick))
+                        {
+                            _app.Network.MyNickname = currentNick;
+                            ConfigManager.Save(_app.LocManager, AudioManager.Instance, _app.Network);
+                        }
                     }
 
                     ImGui.Separator();
@@ -164,9 +171,9 @@ public sealed class MainMenuScene : IScene
                     ImGui.InputText(LocalizationKeys.MenuIpAddress.ToUtf8(), _ipBuffer);
                     ImGui.InputInt(LocalizationKeys.MenuPort.ToUtf8(), ref _portInt);
 
-                    // Отображаем, какой мир будет запущен в качестве сервера
                     string activeWorld = System.Text.Encoding.UTF8.GetString(_worldNameBuffer).Split('\0')[0].Trim();
-                    ImGui.TextColored(new float4(1f, 0.7f, 0f, 1f), $"Выбранный мир для хостинга: {activeWorld}");
+                    string hostInfoFmt = string.Format(System.Text.Encoding.UTF8.GetString(LocalizationKeys.MenuHostingWorldInfo.ToUtf8()), activeWorld);
+                    ImGui.TextColored(new float4(1f, 0.7f, 0f, 1f), hostInfoFmt);
 
                     if (!string.IsNullOrEmpty(_networkError))
                     {
@@ -181,7 +188,7 @@ public sealed class MainMenuScene : IScene
                         if (_app.Network.StartServer(targetPort))
                         {
                             _networkError = "";
-                            _app.ChangeScene(GameState.Gameplay, activeWorld); // Запуск выбранного на первой вкладке мира
+                            _app.ChangeScene(GameState.Gameplay, activeWorld);
                         }
                         else
                         {
@@ -198,8 +205,8 @@ public sealed class MainMenuScene : IScene
                     ImGui.EndTabItem();
                 }
 
-                // Вкладка 3: Настройки (Бывшая вкладка 1, нижняя часть)
-                if (ImGui.BeginTabItem("Настройки"u8))
+                // Вкладка 3: Настройки
+                if (ImGui.BeginTabItem(LocalizationKeys.MenuSettingsTab.ToUtf8()))
                 {
                     ImGui.Spacing();
                     var loc = _app.LocManager;
@@ -216,30 +223,26 @@ public sealed class MainMenuScene : IScene
                         }
                         ImGui.EndCombo();
                     }
-
                     var audio = AudioManager.Instance;
                     bool volChanged = false;
                     if (ImGui.SliderFloat(LocalizationKeys.MenuMasterVolume.ToUtf8(), ref audio.MasterVolume, 0f, 1f)) volChanged = true;
                     if (ImGui.SliderFloat(LocalizationKeys.MenuMusicVolume.ToUtf8(), ref audio.MusicVolume, 0f, 1f)) volChanged = true;
                     if (ImGui.SliderFloat(LocalizationKeys.MenuSfxVolume.ToUtf8(), ref audio.SfxVolume, 0f, 1f)) volChanged = true;
-
                     if (volChanged)
                     {
                         audio.ApplyVolumes();
                         ConfigManager.Save(loc, audio, _app.Network);
                     }
-
                     ImGui.Separator();
                     if (ImGui.Button(LocalizationKeys.MenuExit.ToUtf8(), new float2(-1, 30))) _app.Window.ShouldClose = true;
                     ImGui.EndTabItem();
                 }
-
+                // Вкладка 4: Модификации
                 if (ImGui.BeginTabItem(LocalizationKeys.MenuModsTab.ToUtf8()))
                 {
                     ImGui.Spacing();
-                    ImGui.TextColored(new float4(0.2f, 0.8f, 1.0f, 1.0f), "Установленные модификации:"u8);
+                    ImGui.TextColored(new float4(0.2f, 0.8f, 1.0f, 1.0f), LocalizationKeys.MenuModsInstalled.ToUtf8());
                     ImGui.Separator();
-
                     var mods = ModManager.LoadedMods;
                     if (mods.Count == 0)
                     {
@@ -251,21 +254,19 @@ public sealed class MainMenuScene : IScene
                         {
                             if (ImGui.TreeNode($"{mod.Name} v{mod.Version}"))
                             {
-                                ImGui.Text($"Автор: {mod.Author}");
-                                ImGui.Text($"Сборка: {mod.AssemblyName}");
+                                ImGui.Text($"{System.Text.Encoding.UTF8.GetString(LocalizationKeys.MenuModAuthor.ToUtf8())}: {mod.Author}");
+                                ImGui.Text($"{System.Text.Encoding.UTF8.GetString(LocalizationKeys.MenuModAssembly.ToUtf8())}: {mod.AssemblyName}");
                                 ImGui.TreePop();
                             }
                         }
                     }
                     ImGui.EndTabItem();
                 }
-
+                // Вкладка 5: Авторы
                 if (ImGui.BeginTabItem(LocalizationKeys.MenuCreditsTab.ToUtf8()))
                 {
                     ImGui.Spacing();
                     ImGui.Text(LocalizationKeys.MenuFrameworkLogo.ToUtf8());
-
-                    // Проверяем, какой бэкенд сейчас активен в приложении
                     if (_app.AssetManager.GetVulkanTexture("brutal_logo") != null)
                     {
                         if (_app.Renderer is VulkanRenderer vkRenderer)
@@ -282,45 +283,32 @@ public sealed class MainMenuScene : IScene
                     }
                     else
                     {
-                        // === РЕЖИМ OPENGL ===
                         var logoTex = _app.AssetManager.GetGlTexture("brutal_logo");
                         if (logoTex.Id != 0)
                         {
                             ImGui.Image(new ImTextureRef { _TexID = (ImTextureID)(nint)logoTex.Id }, new float2(356, 84));
                         }
                     }
-  
                     ImGui.Separator();
                     ImGui.Text(LocalizationKeys.MenuAssetsTitle.ToUtf8());
                     ImGui.Spacing();
-
-                    // 1. Музыкальный ассет
                     ImGui.TextWrapped(LocalizationKeys.MenuAssetMusic1.ToUtf8());
                     ImGui.SameLine(380);
-
-                    // Добавляем к тексту локализации уникальный маркер ##music с помощью интерполяции и u8-литерала
                     string musicBtnText = $"{LocalizationKeys.MenuOpenWebsite.Localized}##music";
                     if (ImGui.Button(musicBtnText))
                     {
-                        OpenUrl("https://incompetech.com/music/royalty-free/music.html");
+                        OpenUrl("incompetech.com");
                     }
-
                     ImGui.Spacing();
-
-                    // 2. Ассет текстур
                     ImGui.TextWrapped(LocalizationKeys.MenuAssetTextures.ToUtf8());
                     ImGui.SameLine(380);
-
-                    // Добавляем к тексту локализации уникальный маркер ##textures
                     string texturesBtnText = $"{LocalizationKeys.MenuOpenWebsite.Localized}##textures";
                     if (ImGui.Button(texturesBtnText))
                     {
-                        OpenUrl("https://screamingbrainstudios.itch.io/tiny-texture-pack");
+                        OpenUrl("itch.io");
                     }
-
-                    ImGui.TextWrapped("Audio engine built using FMOD Engine by Firelight Technologies Pty Ltd.");
+                    ImGui.TextWrapped(LocalizationKeys.MenuAssetAudioEngine.ToUtf8());
                     ImGui.SameLine(380);
-
                     ImGui.EndTabItem();
                 }
             }
@@ -328,7 +316,6 @@ public sealed class MainMenuScene : IScene
         }
         ImGui.End();
     }
-
     private void OpenUrl(string url)
     {
         try
@@ -344,7 +331,6 @@ public sealed class MainMenuScene : IScene
             Console.WriteLine($"[Error] Не удалось открыть ссылку: {ex.Message}");
         }
     }
-
     public void HandleInput(GlfwWindow window, double2 cursorDelta, bool shiftHeld, bool dragging) { }
     public void Dispose() { }
 }

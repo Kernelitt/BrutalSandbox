@@ -344,9 +344,73 @@ public sealed unsafe class NetworkManager : IDisposable
                     offset += 56;
                 }
             }
+            else if (gameId == GameMessageID.ChatMessage)
+            {
+                byte* dataPtr = packet->Data + 2;
+                // Читаем длину сообщения и само сообщение
+                int msgLength = *(int*)dataPtr;
+                string message = System.Text.Encoding.UTF8.GetString(dataPtr + 4, msgLength);
+
+                if (_isServer)
+                {
+                    // Сервер добавляет сообщение в свою локальную сцену (если она активна)
+                    if (_app.CurrentScene is GameplayScene gameplayScene)
+                    {
+                        gameplayScene.AddMessageLocally(message);
+                    }
+
+                    // Ретранслируем сообщение всем остальным клиентам, исключая автора (packet->Guid)
+                    // Для этого создаем пакет и рассылаем его через broadcast = true с исключением
+                    byte[] buffer = new byte[6 + msgLength];
+                    buffer[0] = (byte)DefaultMessageIDTypes.UserPacketEnum;
+                    buffer[1] = (byte)GameMessageID.ChatMessage;
+                    fixed (byte* b = buffer)
+                    {
+                        *(int*)(b + 2) = msgLength;
+                        System.Runtime.InteropServices.Marshal.Copy((IntPtr)(dataPtr + 4), buffer, 6, msgLength);
+                    }
+                    _peer.Send(buffer, PacketPriority.HighPriority, PacketReliability.ReliableOrdered, 0, new AddressOrGUID(packet->Guid), true);
+                }
+                else
+                {
+                    // Клиент просто выводит полученное от сервера сообщение на экран
+                    if (_app.CurrentScene is GameplayScene gameplayScene)
+                    {
+                        gameplayScene.AddMessageLocally(message);
+                    }
+                }
+            }
+
         }
     }
- 
+
+    public void SendChatMessage(string formattedMessage)
+    {
+        if (!_isActive) return;
+
+        byte[] msgBytes = System.Text.Encoding.UTF8.GetBytes(formattedMessage);
+        byte[] buffer = new byte[6 + msgBytes.Length];
+        buffer[0] = (byte)DefaultMessageIDTypes.UserPacketEnum;
+        buffer[1] = (byte)GameMessageID.ChatMessage;
+
+        fixed (byte* p = buffer)
+        {
+            *(int*)(p + 2) = msgBytes.Length;
+            System.Runtime.InteropServices.Marshal.Copy(msgBytes, 0, (IntPtr)(p + 6), msgBytes.Length);
+        }
+
+        if (_isServer)
+        {
+            // Если отправляет сервер (хост), шлем всем клиентам (broadcast = true)
+            _peer.Send(buffer, PacketPriority.HighPriority, PacketReliability.ReliableOrdered, 0, new AddressOrGUID(new SystemAddress()), true);
+        }
+        else
+        {
+            // Если отправляет клиент, шлем строго на сервер (broadcast = false)
+            _peer.Send(buffer, PacketPriority.HighPriority, PacketReliability.ReliableOrdered, 0, new AddressOrGUID(_serverAddress), false);
+        }
+    }
+
     public void SendExistingWorldToClient(SystemAddress clientAddress, Dictionary<uint, uint> serverCubeBlockIds, Dictionary<uint, uint> serverNetworkedCubes)
     {
         if (!_isServer || !_isActive) return;

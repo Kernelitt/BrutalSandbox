@@ -46,3 +46,36 @@ Block.InfoGeometry=Геометрия: {0}
 Block.InfoMass=Масса по умолчанию: {0} кг
 Block.InfoFriction=Трение материала: {0}
 Block.InfoType=Тип элемента: {0}
+
+Menu.WorldSelectTab=Выбор мира
+Menu.CreateNewWorld=Создать новый мир:
+Menu.WorldNameLabel=Имя мира##new
+Menu.LaunchNewWorld=Запустить новый мир
+Menu.AvailableSaves=Доступные сохранения:
+Menu.NoSavedWorlds=Нет сохраненных миров.
+Menu.LoadWorldBtn=Загрузить мир: {0}
+Menu.RenameWorldBtn=Переименовать мир
+Menu.DeleteWorldBtn=Удалить мир
+Menu.RenamePopupTitle=RenameWorldPopup
+Menu.EnterNewName=Введите новое имя мира:
+Menu.Ok=ОК
+Menu.Cancel=Отмена
+Menu.MultiplayerTab=Сетевая игра
+Menu.ProfileSettings=Настройки профиля:
+Menu.NicknameLabel=Ваш никнейм##profile
+Menu.HostingWorldInfo=Выбранный мир для хостинга: {0}
+Menu.SettingsTab=Настройки
+
+Gameplay.SaveWorldBtn=Сохранить мир
+Gameplay.WorldLabel=Мир: {0}
+Chat.SystemNoRights=[Система] У вас нет прав на выполнение команд (вы клиент).
+Chat.ServerKicked=[Сервер] Игрок {0} кикнут.
+Chat.ServerBannedNick=[Сервер] Игрок {0} забанен по никнейму.
+Chat.ServerBannedIp=[Сервер] IP {0} добавлен в бан-лист.
+Chat.ServerClosing=[Сервер] Закрытие сервера и отключение игроков...
+Chat.SystemUnknownCmd=[Система] Неизвестная команда: {0}
+
+Menu.ModsInstalled=Установленные модификации:
+Menu.ModAuthor=Автор
+Menu.ModAssembly=Сборка
+Menu.AssetAudioEngine=Аудио-движок создан с использованием FMOD Engine от Firelight Technologies Pty Ltd.
